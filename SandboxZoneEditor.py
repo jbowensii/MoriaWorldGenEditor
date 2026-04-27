@@ -28,7 +28,7 @@ import tkinter as tk
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # -----------------------------------------------------------------------------
 # Paths & constants
@@ -50,7 +50,7 @@ MOD_NAME = 'SandboxMod'
 # Version lives in SandboxZoneEditor.ini ([build] mod_version). Format is
 # MAJ.MIN.PAT, each segment 0..999. Build auto-bumps patch +1 on success.
 # Starting version (first run, if ini has no value yet): 1.0.1.
-DEFAULT_MOD_VERSION = '2.0.0'
+DEFAULT_MOD_VERSION = '2.5.0'
 
 DATATABLES = {
     'zones':       ('DT_Moria_Zones.json',              'DT_Moria_Zones',              'Zones'),
@@ -224,6 +224,60 @@ TOOLTIPS = {
         "Zone footprint in grid cells: (X × Y × Z).\n"
         "  Z=1 = single floor\n"
         "  Z=4 = four-floor tall zone (like elevators)",
+
+    # ----- Connections tab tooltips -----
+    'conn_filter_zoneset':
+        "Filter the row list by which campaign mode each connection applies to. "
+        "Choose '(any)' to see them all.",
+    'conn_filter_state':
+        "Filter by Live / Disabled / Test enabled state. "
+        "Choose '(any)' to see them all.",
+    'conn_orphans_only':
+        "Show only Live connections whose Origin or Destination landmark has no "
+        "Live zone holding it. These crash the routing A* with a null deref "
+        "(FMorLayoutConnectionInstance::GetZone, offset 0x1a1).",
+    'conn_zoneset':
+        "Which campaign mode this connection applies to. Moria=story; "
+        "SandboxSmall=our 14-chapter sandbox; All=all sets.",
+    'conn_state':
+        "Live=router considers it. Disabled=loader skips it. "
+        "Test=dev only, vanilla skips.",
+    'conn_required':
+        "If true, the router MUST find a path or world generation fails. "
+        "False makes it optional.",
+    'conn_exclusive':
+        "If true, this connection's A* path edges are reserved for it alone. "
+        "False allows sharing with other connections.",
+    'conn_leaf':
+        "If true, path may terminate at a leaf zone (no further outbound "
+        "connections). False requires terminating at a non-leaf.",
+    'conn_zonerule':
+        "Determines how the path between Origin and Destination is constrained.  "
+        "Shared=path may pass through any zone freely (most permissive).  "
+        "Chapter=path must stay within a single chapter's scope (strictest — "
+        "fails when endpoints span multiple chapters).  "
+        "BelongsToOrigin=path owned by the Origin zone.  "
+        "BelongsToDestination=path owned by the Destination zone.",
+    'conn_origin_kind':
+        "LandmarkInterface=connect via a specific landmark's predefined "
+        "connection point (most vanilla connections use this). "
+        "ZoneInterface=connect to a generic zone face directly.",
+    'conn_origin_landmark':
+        "Landmark whose interface is this end of the connection. "
+        "Pick from existing landmarks or 'None' to clear.",
+    'conn_origin_zone':
+        "Zone hosting this endpoint. Used together with Landmark for "
+        "LandmarkInterface kind, or alone for ZoneInterface.",
+    'conn_dest_kind':
+        "LandmarkInterface=connect via a specific landmark's predefined "
+        "connection point (most vanilla connections use this). "
+        "ZoneInterface=connect to a generic zone face directly.",
+    'conn_dest_landmark':
+        "Landmark whose interface is this end of the connection. "
+        "Pick from existing landmarks or 'None' to clear.",
+    'conn_dest_zone':
+        "Zone hosting this endpoint. Used together with Landmark for "
+        "LandmarkInterface kind, or alone for ZoneInterface.",
 }
 
 
@@ -318,6 +372,7 @@ class Settings:
     SECTION_SORT = 'sort'
     SECTION_LOCKS = 'locks'
     SECTION_BUILD = 'build'
+    SECTION_FILTERS = 'filters'
 
     def __init__(self, path: Path):
         self.path = path
@@ -327,7 +382,8 @@ class Settings:
                 self.cfg.read(self.path, encoding='utf-8')
             except Exception:
                 self.cfg = configparser.ConfigParser()
-        for s in (self.SECTION_SORT, self.SECTION_LOCKS, self.SECTION_BUILD):
+        for s in (self.SECTION_SORT, self.SECTION_LOCKS,
+                  self.SECTION_BUILD, self.SECTION_FILTERS):
             if not self.cfg.has_section(s):
                 self.cfg.add_section(s)
 
@@ -345,6 +401,25 @@ class Settings:
         self.cfg.set(self.SECTION_SORT, tree_key,
                      f'{column or ""}|{1 if reverse else 0}')
         self._save()
+
+    # ---- filter / UI prefs (persists across editor sessions) ----
+    def get_filter(self, key, default=''):
+        """Get a saved filter / UI preference value (string)."""
+        return self.cfg.get(self.SECTION_FILTERS, key, fallback=default)
+
+    def set_filter(self, key, value):
+        """Save a filter / UI preference value. Coerces bool/None to str."""
+        if value is None:
+            value = ''
+        elif isinstance(value, bool):
+            value = '1' if value else '0'
+        self.cfg.set(self.SECTION_FILTERS, key, str(value))
+        self._save()
+
+    def get_filter_bool(self, key, default=False):
+        raw = self.cfg.get(self.SECTION_FILTERS, key,
+                           fallback='1' if default else '0')
+        return raw.lower() in ('1', 'true', 'yes')
 
     # ---- locks (protected changes) ----
     def is_locked(self, lock_key):
@@ -996,6 +1071,158 @@ class Issue:
         self.detail = detail  # human-readable
         self.fixer = fixer  # callable() that mutates doc.data in place
         self.fixer_label = fixer_label or ('auto-fix' if fixer else None)
+
+
+# Feature flag — set False to fall back to the old messagebox flow.
+USE_NEW_VALIDATOR_UI = True
+
+
+# Plain-English titles + explanations for every validator check ID.
+# Keys are the `Issue.check` values; values are (title, explanation).
+# Some entries appear under two keys because the user-facing spec used
+# different IDs than the code actually emits — both map to the same
+# friendly text so future renames are painless.
+_HUMAN_TITLES = {
+    # NameMap family
+    'counter_sync': (
+        "NameMap counters out of sync",
+        "Some DataTable's NameMap entry count doesn't match its counter "
+        "fields. Auto-fix re-syncs them."),
+    'nm_count_mismatch': (
+        "NameMap counters out of sync",
+        "Some DataTable's NameMap entry count doesn't match its counter "
+        "fields. Auto-fix re-syncs them."),
+    'namemap_completeness': (
+        "NameMap missing referenced names",
+        "DataTable references names that aren't listed in its NameMap. "
+        "Auto-fix appends them."),
+    'nm_missing_entries': (
+        "NameMap missing referenced names",
+        "DataTable references names that aren't listed in its NameMap. "
+        "Auto-fix appends them."),
+    'namemap_dups': (
+        "NameMap has duplicate names",
+        "Same name appears more than once in a NameMap. Auto-fix removes "
+        "duplicates."),
+    'nm_duplicate_entries': (
+        "NameMap has duplicate names",
+        "Same name appears more than once in a NameMap. Auto-fix removes "
+        "duplicates."),
+
+    # Z-bounds family
+    'z_bounds_zone_top': (
+        "Zone extends past world ceiling (Z=29)",
+        "A zone's top extent (Position.Z + TargetSize.Z - 1) exceeds the "
+        "world max of Z=29. Auto-fix shrinks TargetSize.Z so the zone "
+        "fits within bounds."),
+    'z_bounds_zone_pos': (
+        "Zone Position.Z out of world bounds",
+        "A zone's Position.Z is outside [0, 29]. Auto-fix clamps it "
+        "back into range."),
+    'z_bounds_zone_bottom': (
+        "Zone extends below world floor (Z=0)",
+        "A zone's bottom extent goes below Z=0. Auto-fix raises the "
+        "zone so it sits at or above the world floor."),
+    'z_bounds_chapter': (
+        "Chapter Z values out of world bounds",
+        "A chapter's MinZ/MaxZ/PrimeZ is outside [0, 29]. Auto-fix "
+        "clamps each value into range."),
+    'z_bounds_landmark': (
+        "Landmark BasePosition.Z out of world bounds",
+        "A landmark's BasePosition.Z is outside [0, 29]. Auto-fix "
+        "clamps it into range."),
+
+    # Landmark/zone alignment
+    'landmark_zband_misalign': (
+        "Landmark sits outside its zone's chapter",
+        "A landmark's BasePosition.Z is outside the Z band of the "
+        "chapter that hosts the zone using it. Auto-fix clamps the "
+        "landmark to the chapter MinZ."),
+    'landmark_not_at_minz': (
+        "Landmark not anchored at chapter floor",
+        "A landmark sits inside its chapter's Z band but not at MinZ. "
+        "Engine usually tolerates this, but at world ceiling/floor it "
+        "can push zones off-grid. Auto-fix clamps the landmark to the "
+        "host chapter MinZ."),
+    'unanchored_zone': (
+        "Landmark-driven position references missing landmark",
+        "A zone has bPositionFromLandmarks=true but its LandmarkHandles "
+        "list is empty (or all entries are missing) AND has no explicit "
+        "Position. Game will null-deref. Auto-fix turns off "
+        "bPositionFromLandmarks so the generator picks a spot."),
+    'landmark_pos_lm_loop': (
+        "Landmark-driven position references missing landmark",
+        "A zone has bPositionFromLandmarks=true but its LandmarkHandles "
+        "list is empty or all entries are missing. Auto-fix turns off "
+        "bPositionFromLandmarks."),
+
+    # Connectivity / routing
+    'extended_connectivity_no_neighbour': (
+        "Stair extends to a level that doesn't exist",
+        "A stair zone wants to extend connectivity to a Layer that has "
+        "no chapter present. Game will crash in the A* router. Either "
+        "move the stair away from the world edge, or clear the "
+        "bExtendedConnectivityLandmark flag on its landmark."),
+    'connection_endpoint_disabled': (
+        "Connection points to a missing zone",
+        "A LayoutConnection row references an Origin/Destination zone "
+        "that is Disabled or doesn't exist. Auto-fix disables the "
+        "connection row."),
+    'connection_orphan_endpoint': (
+        "Connection points to a missing zone",
+        "A LayoutConnection row references an Origin/Destination zone "
+        "that doesn't exist (or is disabled). Auto-fix disables the "
+        "connection."),
+
+    # Cross-DT integrity
+    'cross_dt_refs': (
+        "Broken cross-table references",
+        "RowHandle references that don't resolve to a row in the target "
+        "DataTable. Fix by updating the references or restoring the "
+        "target rows."),
+    'duplicate_rows': (
+        "Duplicate row names within a DataTable",
+        "Two rows share the same Name in one DataTable; only the first "
+        "is reachable. Rename or delete one."),
+    'enabled_state': (
+        "Unknown EnabledState value on row(s)",
+        "Some rows have an EnabledState value the engine doesn't "
+        "recognize. Set it to Live, Disabled, CookedOut, or Test."),
+    'empty_struct_arrays': (
+        "Empty struct arrays missing template",
+        "Empty StructProperty arrays must have a DummyStruct template "
+        "or UAssetGUI fromjson dies. Auto-fix injects the templates."),
+    'live_to_disabled': (
+        "Live row references a Disabled row",
+        "A Live zone references a chapter/landmark/deck/zone that is "
+        "Disabled. Auto-fix clears zone refs to None and re-enables "
+        "other Disabled targets."),
+    'chapterid_duplicates': (
+        "Duplicate ChapterID values",
+        "Two or more Live SandboxSmall chapters share the same "
+        "ChapterID. Renumber so each is unique."),
+    'chapter_displayname_missing': (
+        "Chapter DisplayName missing from StringTable",
+        "A chapter's DisplayName references a key that isn't in the "
+        "World StringTable. Add the key, or change the reference."),
+}
+
+
+def humanize(issue):
+    """Return (title, explanation) for an Issue.
+
+    Falls back to a Title-Cased version of the check ID and the raw
+    detail string if no entry exists. The detail text is always
+    available separately via `issue.detail` for callers that want it.
+    """
+    entry = _HUMAN_TITLES.get(issue.check)
+    if entry:
+        title, explanation = entry
+        return title, explanation
+    # Fallback: snake_case -> Title Case
+    pretty = (issue.check or 'unknown').replace('_', ' ').strip()
+    pretty = pretty[:1].upper() + pretty[1:]
+    return pretty, issue.detail or ''
 
 
 class BuildValidator:
@@ -2180,6 +2407,313 @@ class BuildValidator:
 
 
 # -----------------------------------------------------------------------------
+# Pre-build validation dialog (new UX)
+# -----------------------------------------------------------------------------
+
+class _ValidationDialog(tk.Toplevel):
+    """Custom Toplevel for pre-build validation results.
+
+    Shows each Issue with a plain-English title + explanation, a checkbox
+    for selecting which auto-fixes to apply, and three actions:
+      - Apply selected auto-fixes  (runs fixers, re-validates in place)
+      - Build anyway               (proceeds even if errors remain)
+      - Cancel                     (abort build)
+
+    After construction `self.result` is one of: 'skip' (proceed) or
+    'cancel' (abort). Auto-fixes (if applied) are persisted by saving
+    every dirty doc before returning 'skip'.
+    """
+
+    def __init__(self, app, issues, validator):
+        # Standard withdraw -> build -> deiconify pattern (avoids the
+        # empty-grey-rectangle race the user has hit in this codebase).
+        super().__init__(app)
+        self.withdraw()
+        self.app = app
+        self.validator = validator
+        self.issues = list(issues)
+        self.result = 'cancel'  # default if user closes the window
+        self._fix_vars = []  # parallel to self.issues; tk.BooleanVar each
+        self.title('Pre-build validation')
+        self.transient(app)
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.protocol('WM_DELETE_WINDOW', self._on_cancel)
+
+        # Geometry: ~700x500 centered on parent
+        w, h = 760, 540
+        try:
+            px = app.winfo_rootx()
+            py = app.winfo_rooty()
+            pw = app.winfo_width() or w
+            ph = app.winfo_height() or h
+            x = px + max(0, (pw - w) // 2)
+            y = py + max(0, (ph - h) // 2)
+            self.geometry(f'{w}x{h}+{x}+{y}')
+        except Exception:
+            self.geometry(f'{w}x{h}')
+
+        self._build_ui()
+        self._populate(self.issues)
+
+        self.deiconify()
+        self.lift()
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+        self.wait_window(self)
+
+    # --- UI scaffold -------------------------------------------------
+
+    def _build_ui(self):
+        outer = ttk.Frame(self, padding=8)
+        outer.pack(fill='both', expand=True)
+        outer.rowconfigure(1, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        # Header
+        self._header = ttk.Label(outer, text='', font=('TkDefaultFont', 11, 'bold'))
+        self._header.grid(row=0, column=0, sticky='ew', pady=(0, 6))
+
+        # Optional all-clear banner (shown after fixes resolve everything)
+        self._banner = ttk.Label(outer, text='', foreground='#0a7a2e')
+        # Not gridded by default; _populate manages it.
+
+        # Scrollable list area
+        list_frame = ttk.Frame(outer)
+        list_frame.grid(row=1, column=0, sticky='nsew')
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        self._canvas = tk.Canvas(list_frame, highlightthickness=0,
+                                 borderwidth=0)
+        self._canvas.grid(row=0, column=0, sticky='nsew')
+        sb = ttk.Scrollbar(list_frame, orient='vertical',
+                           command=self._canvas.yview)
+        sb.grid(row=0, column=1, sticky='ns')
+        self._canvas.configure(yscrollcommand=sb.set)
+
+        self._inner = ttk.Frame(self._canvas)
+        self._inner_id = self._canvas.create_window(
+            (0, 0), window=self._inner, anchor='nw')
+
+        def _on_inner_config(_e):
+            self._canvas.configure(scrollregion=self._canvas.bbox('all'))
+        self._inner.bind('<Configure>', _on_inner_config)
+
+        def _on_canvas_config(e):
+            # Make inner frame match canvas width so wraplength works.
+            self._canvas.itemconfigure(self._inner_id, width=e.width)
+        self._canvas.bind('<Configure>', _on_canvas_config)
+
+        # Mouse wheel scrolling
+        def _on_wheel(e):
+            delta = -1 if e.delta > 0 else 1
+            self._canvas.yview_scroll(delta, 'units')
+        self._canvas.bind_all('<MouseWheel>', _on_wheel)
+
+        # Bottom button row
+        btn_row = ttk.Frame(outer)
+        btn_row.grid(row=2, column=0, sticky='ew', pady=(8, 0))
+
+        self._apply_btn = ttk.Button(
+            btn_row, text='Apply selected auto-fixes',
+            command=self._on_apply_fixes)
+        self._apply_btn.pack(side='left')
+
+        ttk.Button(btn_row, text='Cancel',
+                   command=self._on_cancel).pack(side='right')
+        self._build_btn = ttk.Button(
+            btn_row, text='Build anyway', command=self._on_build)
+        self._build_btn.pack(side='right', padx=(0, 6))
+
+    # --- (re)populate ------------------------------------------------
+
+    def _populate(self, issues):
+        # Clear existing rows
+        for child in self._inner.winfo_children():
+            child.destroy()
+        self._fix_vars = []
+
+        n_err = sum(1 for i in issues if i.severity == 'error')
+        n_warn = sum(1 for i in issues if i.severity == 'warning')
+        n_info = sum(1 for i in issues if i.severity == 'info')
+        bits = []
+        if n_err: bits.append(f'{n_err} error(s)')
+        if n_warn: bits.append(f'{n_warn} warning(s)')
+        if n_info: bits.append(f'{n_info} info')
+        head = ('Pre-build validation: ' +
+                (', '.join(bits) if bits else 'no issues found'))
+        self._header.configure(text=head)
+
+        # Banner: green "all clear" only if zero issues
+        if not issues:
+            self._banner.configure(
+                text='All clear — no validation issues remaining.')
+            self._banner.grid(row=0, column=0, sticky='ew', pady=(28, 4))
+            self._header.grid_remove()
+            self._apply_btn.configure(state='disabled')
+            self._build_btn.configure(text='Build now', default='active')
+            try:
+                self._build_btn.focus_set()
+            except tk.TclError:
+                pass
+            return
+        else:
+            self._banner.grid_remove()
+            self._header.grid()
+
+        # Build per-issue rows
+        SEV_TAG = {'error': '[ERROR]  ',
+                   'warning': '[WARN]   ',
+                   'info': '[INFO]   '}
+        SEV_COLOR = {'error': '#a4262c',
+                     'warning': '#a06800',
+                     'info': '#1a4f8a'}
+
+        n_fixable = 0
+        for idx, issue in enumerate(issues):
+            title, explanation = humanize(issue)
+            sev = issue.severity or 'info'
+
+            row = ttk.Frame(self._inner, padding=(2, 4))
+            row.pack(fill='x', expand=True)
+
+            tag = ttk.Label(row, text=SEV_TAG.get(sev, '[?]    '),
+                            foreground=SEV_COLOR.get(sev, '#333'),
+                            font=('TkDefaultFont', 9, 'bold'))
+            tag.grid(row=0, column=0, sticky='nw', padx=(0, 6))
+
+            ttl = ttk.Label(row, text=title,
+                            font=('TkDefaultFont', 10, 'bold'),
+                            wraplength=620, justify='left')
+            ttl.grid(row=0, column=1, sticky='w')
+
+            exp = ttk.Label(row, text=explanation,
+                            wraplength=620, justify='left')
+            exp.grid(row=1, column=1, sticky='w', pady=(2, 0))
+
+            # Show the raw detail collapsed underneath in muted text —
+            # users who want the technical specifics can still read it.
+            if issue.detail and issue.detail.strip() != (explanation or '').strip():
+                det = ttk.Label(row, text=issue.detail,
+                                wraplength=620, justify='left',
+                                foreground='#555')
+                det.grid(row=2, column=1, sticky='w', pady=(2, 0))
+
+            # Auto-fix checkbox (if available)
+            if issue.fixer:
+                n_fixable += 1
+                # Default: errors checked, warnings unchecked.
+                default_on = (sev == 'error')
+                var = tk.BooleanVar(value=default_on)
+                lbl = ('Auto-fix available'
+                       if not issue.fixer_label
+                       else f'Auto-fix: {issue.fixer_label}')
+                cb = ttk.Checkbutton(row, text=lbl, variable=var)
+                cb.grid(row=3, column=1, sticky='w', pady=(4, 0))
+                self._fix_vars.append((var, issue))
+            else:
+                self._fix_vars.append((None, issue))
+
+            # Subtle separator
+            sep = ttk.Separator(self._inner, orient='horizontal')
+            sep.pack(fill='x', pady=(4, 0))
+
+            row.columnconfigure(1, weight=1)
+
+        # Update button states
+        self._apply_btn.configure(
+            state='normal' if n_fixable > 0 else 'disabled')
+        # Always allow "Build anyway"; warn user via the header text.
+        self._build_btn.configure(state='normal', text='Build anyway')
+
+        # Reset scroll to top
+        try:
+            self._canvas.yview_moveto(0.0)
+        except tk.TclError:
+            pass
+
+    # --- actions -----------------------------------------------------
+
+    def _on_apply_fixes(self):
+        """Run every checked fixer, save dirty docs, then re-validate
+        and refresh this dialog in place."""
+        selected = [iss for var, iss in self._fix_vars
+                    if var is not None and var.get() and iss.fixer]
+        if not selected:
+            return
+
+        applied = 0
+        for iss in selected:
+            try:
+                iss.fixer()
+                applied += 1
+            except Exception:
+                pass
+
+        # Counter-sync sweep (mirrors BuildValidator.auto_fix tail).
+        for _k, doc in self.validator.docs.items():
+            try:
+                n = len(doc.data.get('NameMap', []))
+                doc.data['NamesReferencedFromExportDataCount'] = n
+                g = doc.data.get('Generations') or []
+                if g and isinstance(g[0], dict):
+                    g[0]['NameCount'] = n
+            except Exception:
+                pass
+
+        # Persist the fixes — same behaviour as the legacy 'fix' path.
+        for doc in self.validator.docs.values():
+            if doc.data is not None:
+                try:
+                    doc.save()
+                except Exception:
+                    pass
+
+        # Re-validate
+        try:
+            new_issues = self.validator.run()
+        except Exception:
+            new_issues = []
+        self.issues = new_issues
+        self._populate(self.issues)
+
+        # Tell the user what just happened in the header.
+        if not new_issues:
+            self._banner.configure(
+                text=f'Auto-fix applied: {applied} issue(s) resolved. '
+                     f'All clear — ready to build.')
+            self._banner.grid(row=0, column=0, sticky='ew', pady=(28, 4))
+        else:
+            self._header.configure(
+                text=self._header.cget('text') +
+                     f'   (auto-fix applied: {applied})')
+
+    def _on_build(self):
+        self.result = 'skip'
+        self._teardown()
+
+    def _on_cancel(self):
+        self.result = 'cancel'
+        self._teardown()
+
+    def _teardown(self):
+        try:
+            self._canvas.unbind_all('<MouseWheel>')
+        except tk.TclError:
+            pass
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+# -----------------------------------------------------------------------------
 # Row views
 # -----------------------------------------------------------------------------
 
@@ -2888,6 +3422,7 @@ class StringsTab(BaseTab):
         btns = ttk.Frame(ed)
         btns.grid(row=2, column=0, columnspan=2, sticky='w', pady=(8, 0))
         ttk.Button(btns, text='Add as New',   command=self._on_add).pack(side=tk.LEFT)
+        ttk.Button(btns, text='Copy',         command=self._on_copy).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btns, text='Update',       command=self._on_update).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btns, text='Delete',       command=self._on_delete).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btns, text='Clear',        command=self._on_clear).pack(side=tk.LEFT, padx=(6, 0))
@@ -2990,6 +3525,35 @@ class StringsTab(BaseTab):
         self._populate()
         self.app.refresh_status()
 
+    def _on_copy(self):
+        doc = self._doc()
+        if not doc:
+            return
+        if self._current_idx is None:
+            messagebox.showwarning('Nothing selected', 'Select an entry to copy.')
+            return
+        try:
+            src = doc.rows[self._current_idx]
+            src_key, src_val = src[0], src[1]
+        except (IndexError, TypeError):
+            return
+        new_key = simpledialog.askstring(
+            'Copy entry', f'New key (copying from "{src_key}"):',
+            initialvalue=f'{src_key}_copy', parent=self)
+        if not new_key:
+            return
+        new_key = new_key.strip()
+        if not new_key:
+            return
+        for entry in doc.rows:
+            if len(entry) >= 1 and entry[0] == new_key:
+                messagebox.showwarning('Duplicate key',
+                    f'Key "{new_key}" already exists.')
+                return
+        doc.rows.append([new_key, copy.deepcopy(src_val)])
+        self._populate()
+        self.app.refresh_status()
+
     def _on_clear(self):
         self._current_idx = None
         self.v_key.set('')
@@ -3053,6 +3617,12 @@ class ZoneTab(BaseTab):
 
     def _build(self):
         toolbar = ttk.Frame(self); toolbar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(toolbar, text='Add Zone…',
+                   command=self._add_zone).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text='Copy Zone…',
+                   command=self._copy_zone).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Delete Zone',
+                   command=self._delete_zone).pack(side=tk.LEFT, padx=(4, 8))
         ttk.Button(toolbar, text='Revert Zone',
                    command=self.revert_current).pack(side=tk.LEFT)
 
@@ -3661,6 +4231,63 @@ class ZoneTab(BaseTab):
         self._refresh_count()
         self.app.refresh_status()
 
+    # ---- Row CRUD (Add / Copy / Delete) ----
+    def _add_zone(self):
+        if not self.doc or not self.doc.rows:
+            messagebox.showerror('Error', 'No template row available.'); return
+        name = simpledialog.askstring('Add Zone', 'Row name:', parent=self)
+        if not name: return
+        name = name.strip()
+        if not name: return
+        if any(r.get('Name') == name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Zone "{name}" already exists.'); return
+        new_row = copy.deepcopy(self.doc.rows[0])
+        new_row['Name'] = name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(name):
+            self.tree.selection_set(name); self.tree.see(name)
+        self.app.refresh_status()
+
+    def _copy_zone(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a zone to copy.'); return
+        src_name = sel[0]
+        src = next((r for r in self.doc.rows if r.get('Name') == src_name), None)
+        if src is None: return
+        new_name = simpledialog.askstring(
+            'Copy Zone', f'New row name (copying from "{src_name}"):',
+            initialvalue=f'{src_name}_copy', parent=self)
+        if not new_name: return
+        new_name = new_name.strip()
+        if not new_name: return
+        if any(r.get('Name') == new_name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Zone "{new_name}" already exists.'); return
+        new_row = copy.deepcopy(src)
+        new_row['Name'] = new_name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(new_name):
+            self.tree.selection_set(new_name); self.tree.see(new_name)
+        self.app.refresh_status()
+
+    def _delete_zone(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a zone to delete.'); return
+        name = sel[0]
+        if not messagebox.askyesno('Delete zone',
+                f'Delete zone "{name}"?\n\nThis cannot be undone (until you reload).'):
+            return
+        self.doc.rows[:] = [r for r in self.doc.rows if r.get('Name') != name]
+        self.doc.reconcile_namemap()
+        self.current = None
+        self.refresh_from_doc()
+        self.app.refresh_status()
+
     # ---- Landmark editing ----
     def _landmark_picker(self, title, default_lm='', default_place='Fixed',
                          default_ext=False):
@@ -3775,6 +4402,10 @@ class ChapterTab(BaseTab):
         toolbar = ttk.Frame(self); toolbar.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(toolbar, text='Add Chapter',
                    command=self.add_chapter_dialog).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text='Copy Chapter…',
+                   command=self._copy_chapter).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Delete Chapter',
+                   command=self._delete_chapter).pack(side=tk.LEFT, padx=(4, 0))
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
         self.status_lbl.pack(side=tk.LEFT, padx=12)
 
@@ -4021,9 +4652,55 @@ class ChapterTab(BaseTab):
                 p['Value'] = 0
             elif n == 'EnabledState': set_enum(p, 'Live')
         self.doc.rows.append(template)
+        self.doc.reconcile_namemap()
         self.chapters.append(ChapterView(template))
         self._insert_row(self.chapters[-1])
         self.status_lbl.config(text=f'{len(self.chapters)} chapters')
+        if hasattr(self.app, 'zone_tab'):
+            self.app.zone_tab._populate_dropdowns()
+        self.app.refresh_status()
+
+    def _copy_chapter(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a chapter to copy.'); return
+        src_name = sel[0]
+        src = next((r for r in self.doc.rows if r.get('Name') == src_name), None)
+        if src is None: return
+        new_name = simpledialog.askstring(
+            'Copy Chapter', f'New row name (copying from "{src_name}"):\n'
+            'Note: ChapterID is not auto-assigned — edit it after copying.',
+            initialvalue=f'{src_name}_copy', parent=self)
+        if not new_name: return
+        new_name = new_name.strip()
+        if not new_name: return
+        if any(r.get('Name') == new_name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Chapter "{new_name}" already exists.'); return
+        new_row = copy.deepcopy(src)
+        new_row['Name'] = new_name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.chapters.append(ChapterView(new_row))
+        self._insert_row(self.chapters[-1])
+        self.status_lbl.config(text=f'{len(self.chapters)} chapters')
+        if self.tree.exists(new_name):
+            self.tree.selection_set(new_name); self.tree.see(new_name)
+        if hasattr(self.app, 'zone_tab'):
+            self.app.zone_tab._populate_dropdowns()
+        self.app.refresh_status()
+
+    def _delete_chapter(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a chapter to delete.'); return
+        name = sel[0]
+        if not messagebox.askyesno('Delete chapter',
+                f'Delete chapter "{name}"?\n\nZones referencing it will be orphaned.'):
+            return
+        self.doc.rows[:] = [r for r in self.doc.rows if r.get('Name') != name]
+        self.doc.reconcile_namemap()
+        self.current = None
+        self.refresh_from_doc()
         if hasattr(self.app, 'zone_tab'):
             self.app.zone_tab._populate_dropdowns()
         self.app.refresh_status()
@@ -4048,6 +4725,12 @@ class BiomeTab(BaseTab):
 
     def _build(self):
         toolbar = ttk.Frame(self); toolbar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(toolbar, text='Add Biome…',
+                   command=self._add_biome).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text='Copy Biome…',
+                   command=self._copy_biome).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Delete Biome',
+                   command=self._delete_biome).pack(side=tk.LEFT, padx=(4, 8))
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
         self.status_lbl.pack(side=tk.LEFT)
 
@@ -4155,6 +4838,63 @@ class BiomeTab(BaseTab):
             self.tree.item(row_id, values=tuple(vals), tags=tuple(tags))
         self.app.refresh_status()
 
+    # ---- Row CRUD ----
+    def _add_biome(self):
+        if not self.doc or not self.doc.rows:
+            messagebox.showerror('Error', 'No template row available.'); return
+        name = simpledialog.askstring('Add Biome', 'Row name:', parent=self)
+        if not name: return
+        name = name.strip()
+        if not name: return
+        if any(r.get('Name') == name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Biome "{name}" already exists.'); return
+        new_row = copy.deepcopy(self.doc.rows[0])
+        new_row['Name'] = name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(name):
+            self.tree.selection_set(name); self.tree.see(name)
+        self.app.refresh_status()
+
+    def _copy_biome(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a biome to copy.'); return
+        src_name = sel[0]
+        src = next((r for r in self.doc.rows if r.get('Name') == src_name), None)
+        if src is None: return
+        new_name = simpledialog.askstring(
+            'Copy Biome', f'New row name (copying from "{src_name}"):',
+            initialvalue=f'{src_name}_copy', parent=self)
+        if not new_name: return
+        new_name = new_name.strip()
+        if not new_name: return
+        if any(r.get('Name') == new_name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Biome "{new_name}" already exists.'); return
+        new_row = copy.deepcopy(src)
+        new_row['Name'] = new_name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(new_name):
+            self.tree.selection_set(new_name); self.tree.see(new_name)
+        self.app.refresh_status()
+
+    def _delete_biome(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a biome to delete.'); return
+        name = sel[0]
+        if not messagebox.askyesno('Delete biome',
+                f'Delete biome "{name}"?\n\nZones referencing it will be orphaned.'):
+            return
+        self.doc.rows[:] = [r for r in self.doc.rows if r.get('Name') != name]
+        self.doc.reconcile_namemap()
+        self.current = None
+        self.refresh_from_doc()
+        self.app.refresh_status()
+
 
 # -----------------------------------------------------------------------------
 # BUBBLES (ZONEDECK) TAB — editable
@@ -4236,6 +4976,12 @@ class BubbleTab(BaseTab):
 
     def _build(self):
         toolbar = ttk.Frame(self); toolbar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(toolbar, text='Add Deck…',
+                   command=self._add_deck).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text='Copy Deck…',
+                   command=self._copy_deck).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Delete Deck',
+                   command=self._delete_deck).pack(side=tk.LEFT, padx=(4, 8))
         ttk.Label(toolbar, text='ZoneDecks feed bubbles into zones',
                   foreground='#555').pack(side=tk.LEFT)
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
@@ -4449,6 +5195,63 @@ class BubbleTab(BaseTab):
         self._refresh_right(); self._refresh_row(self.current)
         self.app.refresh_status()
 
+    # ---- Row CRUD (Deck list) ----
+    def _add_deck(self):
+        if not self.doc or not self.doc.rows:
+            messagebox.showerror('Error', 'No template row available.'); return
+        name = simpledialog.askstring('Add ZoneDeck', 'Row name:', parent=self)
+        if not name: return
+        name = name.strip()
+        if not name: return
+        if any(r.get('Name') == name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Deck "{name}" already exists.'); return
+        new_row = copy.deepcopy(self.doc.rows[0])
+        new_row['Name'] = name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(name):
+            self.tree.selection_set(name); self.tree.see(name)
+        self.app.refresh_status()
+
+    def _copy_deck(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a deck to copy.'); return
+        src_name = sel[0]
+        src = next((r for r in self.doc.rows if r.get('Name') == src_name), None)
+        if src is None: return
+        new_name = simpledialog.askstring(
+            'Copy ZoneDeck', f'New row name (copying from "{src_name}"):',
+            initialvalue=f'{src_name}_copy', parent=self)
+        if not new_name: return
+        new_name = new_name.strip()
+        if not new_name: return
+        if any(r.get('Name') == new_name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Deck "{new_name}" already exists.'); return
+        new_row = copy.deepcopy(src)
+        new_row['Name'] = new_name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(new_name):
+            self.tree.selection_set(new_name); self.tree.see(new_name)
+        self.app.refresh_status()
+
+    def _delete_deck(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a deck to delete.'); return
+        name = sel[0]
+        if not messagebox.askyesno('Delete ZoneDeck',
+                f'Delete deck "{name}"?\n\nZones referencing it will be orphaned.'):
+            return
+        self.doc.rows[:] = [r for r in self.doc.rows if r.get('Name') != name]
+        self.doc.reconcile_namemap()
+        self.current = None
+        self.refresh_from_doc()
+        self.app.refresh_status()
+
 
 # -----------------------------------------------------------------------------
 # FILTERS (ZoneBubbleFilters) TAB
@@ -4468,6 +5271,12 @@ class FilterTab(BaseTab):
 
     def _build(self):
         toolbar = ttk.Frame(self); toolbar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(toolbar, text='Add Filter…',
+                   command=self._add_filter).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text='Copy Filter…',
+                   command=self._copy_filter).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Delete Filter',
+                   command=self._delete_filter).pack(side=tk.LEFT, padx=(4, 8))
         ttk.Label(toolbar, text='ZoneBubbleFilters: whitelist/blacklist bubbles per filter row',
                   foreground='#555').pack(side=tk.LEFT)
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
@@ -4585,6 +5394,62 @@ class FilterTab(BaseTab):
         self._refresh_lists(); self._refresh_row(self.current)
         self.app.refresh_status()
 
+    # ---- Row CRUD ----
+    def _add_filter(self):
+        if not self.doc or not self.doc.rows:
+            messagebox.showerror('Error', 'No template row available.'); return
+        name = simpledialog.askstring('Add Filter', 'Row name:', parent=self)
+        if not name: return
+        name = name.strip()
+        if not name: return
+        if any(r.get('Name') == name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Filter "{name}" already exists.'); return
+        new_row = copy.deepcopy(self.doc.rows[0])
+        new_row['Name'] = name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(name):
+            self.tree.selection_set(name); self.tree.see(name)
+        self.app.refresh_status()
+
+    def _copy_filter(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a filter to copy.'); return
+        src_name = sel[0]
+        src = next((r for r in self.doc.rows if r.get('Name') == src_name), None)
+        if src is None: return
+        new_name = simpledialog.askstring(
+            'Copy Filter', f'New row name (copying from "{src_name}"):',
+            initialvalue=f'{src_name}_copy', parent=self)
+        if not new_name: return
+        new_name = new_name.strip()
+        if not new_name: return
+        if any(r.get('Name') == new_name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Filter "{new_name}" already exists.'); return
+        new_row = copy.deepcopy(src)
+        new_row['Name'] = new_name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(new_name):
+            self.tree.selection_set(new_name); self.tree.see(new_name)
+        self.app.refresh_status()
+
+    def _delete_filter(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a filter to delete.'); return
+        name = sel[0]
+        if not messagebox.askyesno('Delete filter', f'Delete filter "{name}"?'):
+            return
+        self.doc.rows[:] = [r for r in self.doc.rows if r.get('Name') != name]
+        self.doc.reconcile_namemap()
+        self.current = None
+        self.refresh_from_doc()
+        self.app.refresh_status()
+
 
 # -----------------------------------------------------------------------------
 # LANDMARKS TAB
@@ -4605,6 +5470,12 @@ class LandmarkTab(BaseTab):
 
     def _build(self):
         toolbar = ttk.Frame(self); toolbar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(toolbar, text='Add Landmark…',
+                   command=self._add_landmark_row).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text='Copy Landmark…',
+                   command=self._copy_landmark_row).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Delete Landmark',
+                   command=self._delete_landmark_row).pack(side=tk.LEFT, padx=(4, 8))
         ttk.Label(toolbar, text='Landmarks anchor bubbles + drive zone connectivity',
                   foreground='#555').pack(side=tk.LEFT)
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
@@ -4792,6 +5663,64 @@ class LandmarkTab(BaseTab):
             self.current.set_connections(conns)
             self._refresh_conn_list(); self._refresh_row(self.current)
             self.app.refresh_status()
+
+    # ---- Row CRUD (Landmark list) ----
+    def _add_landmark_row(self):
+        if not self.doc or not self.doc.rows:
+            messagebox.showerror('Error', 'No template row available.'); return
+        name = simpledialog.askstring('Add Landmark', 'Row name:', parent=self)
+        if not name: return
+        name = name.strip()
+        if not name: return
+        if any(r.get('Name') == name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Landmark "{name}" already exists.'); return
+        new_row = copy.deepcopy(self.doc.rows[0])
+        new_row['Name'] = name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(name):
+            self.tree.selection_set(name); self.tree.see(name)
+        self.app.refresh_status()
+
+    def _copy_landmark_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a landmark to copy.'); return
+        src_name = sel[0]
+        src = next((r for r in self.doc.rows if r.get('Name') == src_name), None)
+        if src is None: return
+        new_name = simpledialog.askstring(
+            'Copy Landmark', f'New row name (copying from "{src_name}"):',
+            initialvalue=f'{src_name}_copy', parent=self)
+        if not new_name: return
+        new_name = new_name.strip()
+        if not new_name: return
+        if any(r.get('Name') == new_name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Landmark "{new_name}" already exists.'); return
+        new_row = copy.deepcopy(src)
+        new_row['Name'] = new_name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(new_name):
+            self.tree.selection_set(new_name); self.tree.see(new_name)
+        self.app.refresh_status()
+
+    def _delete_landmark_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a landmark to delete.'); return
+        name = sel[0]
+        if not messagebox.askyesno('Delete landmark',
+                f'Delete landmark "{name}"?\n\n'
+                'Zones and LayoutConnections referencing it will be orphaned.'):
+            return
+        self.doc.rows[:] = [r for r in self.doc.rows if r.get('Name') != name]
+        self.doc.reconcile_namemap()
+        self.current = None
+        self.refresh_from_doc()
+        self.app.refresh_status()
 
 
 # -----------------------------------------------------------------------------
@@ -5401,6 +6330,656 @@ class HistoryTab(BaseTab):
 
 
 # -----------------------------------------------------------------------------
+# LAYOUT CONNECTIONS TAB — view + edit DT_Moria_LayoutConnections rows
+# -----------------------------------------------------------------------------
+
+class LayoutConnectionsTab(BaseTab):
+    """View + edit rows in DT_Moria_LayoutConnections.
+
+    Each row wires two endpoints (Origin / Destination) — each endpoint
+    is either a Landmark (via LandmarkInterface) or a Zone (via
+    ZoneInterface). Together with ZoneRule, EnabledState, bRequired and
+    bExclusive, they tell the runtime A* router how to wire chapters
+    together at world-gen time.
+
+    Orphan rows — Live connections whose Origin or Destination landmark
+    has no Live SS zone holding it via LandmarkHandles[] — are the
+    classic crash class for `FMorLayoutConnectionInstance::GetZone`
+    (offset 0x1a1). This tab highlights them in red.
+    """
+
+    # Enum option lists — provided as plain strings (the JSON stores them
+    # with the leading enum prefix, which we add/strip on read/write).
+    ENABLED_STATE_OPTS = ['Live', 'Disabled', 'Test']
+    ZONE_SET_OPTS = ['Moria', 'SandboxSmall', 'SandboxMedium', 'Expedition',
+                     'ExpeditionRescue', 'ExpeditionGrendel', 'ExpeditionForge',
+                     'EZoneSet_MAX', 'All']
+    ZONE_RULE_OPTS = ['Shared', 'Chapter', 'BelongsToOrigin', 'BelongsToDestination']
+    ENDPOINT_KIND_OPTS = ['LandmarkInterface', 'ZoneInterface']
+    FAVOR_OPTS = ['Any', 'Origin', 'Destination']
+
+    def __init__(self, parent, app):
+        super().__init__(parent, app)
+        self.doc = app.docs.get('connections')
+        self.zones_doc = app.docs.get('zones')
+        self.landmarks_doc = app.docs.get('landmarks')
+        self.current_row = None
+        self._updating = False
+        self._build()
+
+    def refresh_from_doc(self):
+        self._populate_tree()
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _fp(v, n):
+        for p in v or []:
+            if isinstance(p, dict) and p.get('Name') == n:
+                return p
+        return None
+
+    @classmethod
+    def _get_rowname(cls, r, k):
+        p = cls._fp(r['Value'], k)
+        if not p: return None
+        v = p.get('Value')
+        if isinstance(v, list):
+            for it in v:
+                if isinstance(it, dict) and it.get('Name') == 'RowName':
+                    return it.get('Value', '')
+        return v
+
+    @classmethod
+    def _get_enum_short(cls, r, k):
+        p = cls._fp(r['Value'], k)
+        if not p: return ''
+        v = p.get('Value')
+        if isinstance(v, str) and '::' in v:
+            return v.split('::', 1)[1]
+        return str(v) if v else ''
+
+    @classmethod
+    def _get_bool(cls, r, k):
+        p = cls._fp(r['Value'], k)
+        return bool(p.get('Value')) if p else False
+
+    @classmethod
+    def _row_orphan_status(cls, row, holders_by_set):
+        """Return tuple (is_orphan, reason).
+
+        A connection is an orphan if its Origin or Destination landmark
+        is not held by any Live zone in a ZoneSet that the connection
+        APPLIES to:
+          - ZoneSet=SandboxSmall → must be held by a Live SS zone
+          - ZoneSet=Moria        → must be held by a Live Moria zone
+          - ZoneSet=All          → must be held by SOME Live zone in any set
+          - other ZoneSets       → not flagged here (out of scope)
+        """
+        es = cls._get_enum_short(row, 'EnabledState')
+        if es != 'Live': return (False, '')
+        zs = cls._get_enum_short(row, 'ZoneSet')
+
+        # Build the candidate-holder set for this connection's ZoneSet
+        if zs == 'All':
+            # Held by any Live zone in any set
+            relevant = set()
+            for s in holders_by_set.values(): relevant |= s
+        elif zs in holders_by_set:
+            relevant = holders_by_set[zs]
+        else:
+            # Unknown / unsupported zoneset — don't flag
+            return (False, '')
+
+        for fld in ('OriginLandmark', 'DestinationLandmark'):
+            v = cls._get_rowname(row, fld)
+            if v and v != 'None' and v not in relevant:
+                scope = 'any Live zone' if zs == 'All' else f'any Live {zs} zone'
+                return (True, f'{fld}={v} not held by {scope}')
+        return (False, '')
+
+    def _build_landmark_holders(self):
+        """Map of {ZoneSet -> set of landmark names} held by Live zones in
+        that set via LandmarkHandles. Lets the orphan check evaluate
+        connections against the right scope."""
+        holders = {}  # {zoneset: {landmark_name, ...}}
+        if not self.zones_doc: return holders
+        for r in self.zones_doc.rows:
+            zs_p = self._fp(r.get('Value', []), 'ZoneSet')
+            zs = (zs_p.get('Value', '').split('::', 1)[-1] if zs_p else '')
+            if not zs: continue
+            es = self._get_enum_short(r, 'EnabledState')
+            if es == 'Disabled': continue
+            lh = self._fp(r.get('Value', []), 'LandmarkHandles')
+            if not lh: continue
+            bucket = holders.setdefault(zs, set())
+            for e in (lh.get('Value') or []):
+                if not isinstance(e, dict): continue
+                inner = e.get('Value')
+                if not isinstance(inner, list): continue
+                lhprop = self._fp(inner, 'Landmark')
+                if not lhprop: continue
+                lv = lhprop.get('Value')
+                if isinstance(lv, list):
+                    for it in lv:
+                        if isinstance(it, dict) and it.get('Name') == 'RowName':
+                            nm = it.get('Value', '')
+                            if nm and nm != 'None':
+                                bucket.add(nm)
+        return holders
+
+    def _all_zone_names(self):
+        if not self.zones_doc: return []
+        return ['None'] + sorted({r['Name'] for r in self.zones_doc.rows
+                                  if isinstance(r, dict) and r.get('Name')})
+
+    def _all_landmark_names(self):
+        if not self.landmarks_doc: return []
+        return ['None'] + sorted({r['Name'] for r in self.landmarks_doc.rows
+                                   if isinstance(r, dict) and r.get('Name')})
+
+    # ---------- UI ----------
+    def _build(self):
+        # Toolbar with filters
+        bar = ttk.Frame(self); bar.pack(fill=tk.X, pady=(0, 4))
+
+        ttk.Button(bar, text='Add…',
+                   command=self._add_connection_row).pack(side=tk.LEFT)
+        ttk.Button(bar, text='Copy…',
+                   command=self._copy_connection_row).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(bar, text='Delete',
+                   command=self._delete_connection_row).pack(side=tk.LEFT, padx=(4, 8))
+
+        lbl_fzs = ttk.Label(bar, text='ZoneSet:')
+        lbl_fzs.pack(side=tk.LEFT, padx=(0, 4))
+        attach_tooltip(lbl_fzs, 'conn_filter_zoneset')
+        # Default = '(All)' bypass so every row is visible. Renamed the
+        # bypass option to '(any)' to avoid confusion with the literal
+        # EZoneSet::All enum value (which is one of the real ZoneSets a
+        # connection can be tagged with).
+        # Filter values persist across editor sessions in the .ini's
+        # [filters] section, just like sort state in [sort].
+        saved_zs = SETTINGS.get_filter('connections_zoneset', '(any)') or '(any)'
+        valid_zs = ['(any)'] + self.ZONE_SET_OPTS
+        if saved_zs not in valid_zs: saved_zs = '(any)'
+        self.v_filter_zoneset = tk.StringVar(value=saved_zs)
+        cb_fzs = ttk.Combobox(bar, textvariable=self.v_filter_zoneset, width=14,
+                     state='readonly', values=valid_zs)
+        cb_fzs.pack(side=tk.LEFT, padx=(0, 12))
+        attach_tooltip(cb_fzs, 'conn_filter_zoneset')
+
+        def _on_zs_change(*_):
+            SETTINGS.set_filter('connections_zoneset',
+                                 self.v_filter_zoneset.get())
+            self._populate_tree()
+        self.v_filter_zoneset.trace_add('write', _on_zs_change)
+
+        lbl_fst = ttk.Label(bar, text='State:')
+        lbl_fst.pack(side=tk.LEFT, padx=(0, 4))
+        attach_tooltip(lbl_fst, 'conn_filter_state')
+        saved_st = SETTINGS.get_filter('connections_state', '(any)') or '(any)'
+        valid_st = ['(any)', 'Live', 'Disabled', 'Test']
+        if saved_st not in valid_st: saved_st = '(any)'
+        self.v_filter_state = tk.StringVar(value=saved_st)
+        cb_fst = ttk.Combobox(bar, textvariable=self.v_filter_state, width=10,
+                     state='readonly', values=valid_st)
+        cb_fst.pack(side=tk.LEFT, padx=(0, 12))
+        attach_tooltip(cb_fst, 'conn_filter_state')
+
+        def _on_st_change(*_):
+            SETTINGS.set_filter('connections_state',
+                                 self.v_filter_state.get())
+            self._populate_tree()
+        self.v_filter_state.trace_add('write', _on_st_change)
+
+        saved_orph = SETTINGS.get_filter_bool('connections_orphans_only', False)
+        self.v_orphans_only = tk.BooleanVar(value=saved_orph)
+        def _on_orph_change():
+            SETTINGS.set_filter('connections_orphans_only',
+                                 self.v_orphans_only.get())
+            self._populate_tree()
+        chk_orph = ttk.Checkbutton(bar, text='Orphans only',
+                        variable=self.v_orphans_only,
+                        command=_on_orph_change)
+        chk_orph.pack(side=tk.LEFT, padx=(0, 12))
+        attach_tooltip(chk_orph, 'conn_orphans_only')
+
+        self.status_lbl = ttk.Label(bar, text='', foreground='#555')
+        self.status_lbl.pack(side=tk.RIGHT)
+
+        # Paned: list left, detail right
+        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(paned); paned.add(left, weight=2)
+        cols = ('name','zoneset','state','olm','oz','dlm','dz','rule','flags')
+        specs = [
+            ('name',   'Connection',           240, True),
+            ('zoneset','ZoneSet',               90, False),
+            ('state',  'State',                 75, False),
+            ('olm',    'OriginLandmark',       170, True),
+            ('oz',     'OriginZone',           170, True),
+            ('dlm',    'DestLandmark',         170, True),
+            ('dz',     'DestZone',             170, True),
+            ('rule',   'ZoneRule',             100, False),
+            ('flags',  'Req/Exc',               70, False),
+        ]
+        self.tree = self.make_tree(left, cols, specs, settings_key='connections')
+        try:
+            self.tree.tag_configure(DISABLED_TAG, foreground='#999999')
+            self.tree.tag_configure('orphan', foreground='#c0392b',
+                                    background='#3a1a1a')
+        except Exception: pass
+        self.tree.bind('<<TreeviewSelect>>', self._on_select)
+
+        right = ttk.Frame(paned); paned.add(right, weight=1)
+        self._build_detail(right)
+
+    def _build_detail(self, parent):
+        d = ttk.LabelFrame(parent, text='Connection Detail', padding=8)
+        d.pack(fill=tk.BOTH, expand=True)
+
+        g = ttk.Frame(d); g.pack(fill=tk.X)
+        self.v_name = tk.StringVar(value='(no connection selected)')
+        ttk.Label(g, text='Row:', width=10).grid(row=0, column=0, sticky='w')
+        ttk.Label(g, textvariable=self.v_name,
+                  font=('Segoe UI', 10, 'bold')).grid(row=0, column=1, columnspan=3, sticky='w')
+
+        # ZoneSet + EnabledState
+        lbl_zs = ttk.Label(g, text='ZoneSet:')
+        lbl_zs.grid(row=1, column=0, sticky='w', pady=(8, 0))
+        attach_tooltip(lbl_zs, 'conn_zoneset')
+        self.v_zoneset = tk.StringVar()
+        cb_zs = ttk.Combobox(g, textvariable=self.v_zoneset, width=20,
+                              state='readonly', values=self.ZONE_SET_OPTS)
+        cb_zs.grid(row=1, column=1, sticky='w', pady=(8, 0))
+        cb_zs.bind('<<ComboboxSelected>>',
+                   lambda _e: self._apply_enum('ZoneSet', 'EZoneSet::',
+                                                self.v_zoneset.get()))
+        attach_tooltip(cb_zs, 'conn_zoneset')
+
+        lbl_st = ttk.Label(g, text='State:')
+        lbl_st.grid(row=1, column=2, sticky='w', padx=(16, 0), pady=(8, 0))
+        attach_tooltip(lbl_st, 'conn_state')
+        self.v_state = tk.StringVar()
+        cb_st = ttk.Combobox(g, textvariable=self.v_state, width=12,
+                              state='readonly', values=self.ENABLED_STATE_OPTS)
+        cb_st.grid(row=1, column=3, sticky='w', pady=(8, 0))
+        cb_st.bind('<<ComboboxSelected>>',
+                   lambda _e: self._apply_enum('EnabledState',
+                                                'ERowEnabledState::',
+                                                self.v_state.get()))
+        attach_tooltip(cb_st, 'conn_state')
+
+        # Required / Exclusive / LeafZoneRoute
+        flags = ttk.Frame(d); flags.pack(fill=tk.X, pady=(8, 0))
+        self.v_required = tk.BooleanVar()
+        chk_req = ttk.Checkbutton(flags, text='bRequired', variable=self.v_required,
+                        command=lambda: self._apply_bool('bRequired',
+                                                          self.v_required.get()))
+        chk_req.pack(side=tk.LEFT)
+        attach_tooltip(chk_req, 'conn_required')
+        self.v_exclusive = tk.BooleanVar()
+        chk_exc = ttk.Checkbutton(flags, text='bExclusive', variable=self.v_exclusive,
+                        command=lambda: self._apply_bool('bExclusive',
+                                                          self.v_exclusive.get()))
+        chk_exc.pack(side=tk.LEFT, padx=12)
+        attach_tooltip(chk_exc, 'conn_exclusive')
+        self.v_leaf = tk.BooleanVar()
+        chk_leaf = ttk.Checkbutton(flags, text='bLeafZoneRoute', variable=self.v_leaf,
+                        command=lambda: self._apply_bool('bLeafZoneRoute',
+                                                          self.v_leaf.get()))
+        chk_leaf.pack(side=tk.LEFT)
+        attach_tooltip(chk_leaf, 'conn_leaf')
+
+        # ZoneRule
+        rl = ttk.Frame(d); rl.pack(fill=tk.X, pady=(8, 0))
+        lbl_rl = ttk.Label(rl, text='ZoneRule:', width=10)
+        lbl_rl.pack(side=tk.LEFT)
+        attach_tooltip(lbl_rl, 'conn_zonerule')
+        self.v_rule = tk.StringVar()
+        cb_rl = ttk.Combobox(rl, textvariable=self.v_rule, width=24,
+                              state='readonly', values=self.ZONE_RULE_OPTS)
+        cb_rl.pack(side=tk.LEFT)
+        cb_rl.bind('<<ComboboxSelected>>',
+                   lambda _e: self._apply_enum('ZoneRule',
+                                                'EConnectionZoneRule::',
+                                                self.v_rule.get()))
+        attach_tooltip(cb_rl, 'conn_zonerule')
+
+        # ORIGIN endpoint
+        of = ttk.LabelFrame(d, text='Origin', padding=6)
+        of.pack(fill=tk.X, pady=(8, 0))
+        lbl_okind = ttk.Label(of, text='Kind:', width=10)
+        lbl_okind.grid(row=0, column=0, sticky='w')
+        attach_tooltip(lbl_okind, 'conn_origin_kind')
+        self.v_okind = tk.StringVar()
+        cb_ok = ttk.Combobox(of, textvariable=self.v_okind, width=24,
+                              state='readonly', values=self.ENDPOINT_KIND_OPTS)
+        cb_ok.grid(row=0, column=1, sticky='w')
+        cb_ok.bind('<<ComboboxSelected>>',
+                   lambda _e: self._apply_enum('OriginKind',
+                                                'EConnectionEndpointKind::',
+                                                self.v_okind.get()))
+        attach_tooltip(cb_ok, 'conn_origin_kind')
+        lbl_olm = ttk.Label(of, text='Landmark:')
+        lbl_olm.grid(row=1, column=0, sticky='w', pady=(4,0))
+        attach_tooltip(lbl_olm, 'conn_origin_landmark')
+        self.v_olm = tk.StringVar()
+        self.cb_olm = ttk.Combobox(of, textvariable=self.v_olm, width=40)
+        self.cb_olm.grid(row=1, column=1, sticky='w', pady=(4,0))
+        self.cb_olm.bind('<<ComboboxSelected>>',
+                          lambda _e: self._apply_rowhandle('OriginLandmark',
+                                                            self.v_olm.get()))
+        self.cb_olm.bind('<FocusOut>',
+                          lambda _e: self._apply_rowhandle('OriginLandmark',
+                                                            self.v_olm.get()))
+        attach_tooltip(self.cb_olm, 'conn_origin_landmark')
+        lbl_oz = ttk.Label(of, text='Zone:')
+        lbl_oz.grid(row=2, column=0, sticky='w', pady=(4,0))
+        attach_tooltip(lbl_oz, 'conn_origin_zone')
+        self.v_oz = tk.StringVar()
+        self.cb_oz = ttk.Combobox(of, textvariable=self.v_oz, width=40)
+        self.cb_oz.grid(row=2, column=1, sticky='w', pady=(4,0))
+        self.cb_oz.bind('<<ComboboxSelected>>',
+                         lambda _e: self._apply_rowhandle('OriginZone',
+                                                           self.v_oz.get()))
+        self.cb_oz.bind('<FocusOut>',
+                         lambda _e: self._apply_rowhandle('OriginZone',
+                                                           self.v_oz.get()))
+        attach_tooltip(self.cb_oz, 'conn_origin_zone')
+
+        # DESTINATION endpoint
+        df = ttk.LabelFrame(d, text='Destination', padding=6)
+        df.pack(fill=tk.X, pady=(8, 0))
+        lbl_dkind = ttk.Label(df, text='Kind:', width=10)
+        lbl_dkind.grid(row=0, column=0, sticky='w')
+        attach_tooltip(lbl_dkind, 'conn_dest_kind')
+        self.v_dkind = tk.StringVar()
+        cb_dk = ttk.Combobox(df, textvariable=self.v_dkind, width=24,
+                              state='readonly', values=self.ENDPOINT_KIND_OPTS)
+        cb_dk.grid(row=0, column=1, sticky='w')
+        cb_dk.bind('<<ComboboxSelected>>',
+                   lambda _e: self._apply_enum('DestinationKind',
+                                                'EConnectionEndpointKind::',
+                                                self.v_dkind.get()))
+        attach_tooltip(cb_dk, 'conn_dest_kind')
+        lbl_dlm = ttk.Label(df, text='Landmark:')
+        lbl_dlm.grid(row=1, column=0, sticky='w', pady=(4,0))
+        attach_tooltip(lbl_dlm, 'conn_dest_landmark')
+        self.v_dlm = tk.StringVar()
+        self.cb_dlm = ttk.Combobox(df, textvariable=self.v_dlm, width=40)
+        self.cb_dlm.grid(row=1, column=1, sticky='w', pady=(4,0))
+        self.cb_dlm.bind('<<ComboboxSelected>>',
+                          lambda _e: self._apply_rowhandle('DestinationLandmark',
+                                                            self.v_dlm.get()))
+        self.cb_dlm.bind('<FocusOut>',
+                          lambda _e: self._apply_rowhandle('DestinationLandmark',
+                                                            self.v_dlm.get()))
+        attach_tooltip(self.cb_dlm, 'conn_dest_landmark')
+        lbl_dz = ttk.Label(df, text='Zone:')
+        lbl_dz.grid(row=2, column=0, sticky='w', pady=(4,0))
+        attach_tooltip(lbl_dz, 'conn_dest_zone')
+        self.v_dz = tk.StringVar()
+        self.cb_dz = ttk.Combobox(df, textvariable=self.v_dz, width=40)
+        self.cb_dz.grid(row=2, column=1, sticky='w', pady=(4,0))
+        self.cb_dz.bind('<<ComboboxSelected>>',
+                         lambda _e: self._apply_rowhandle('DestinationZone',
+                                                           self.v_dz.get()))
+        self.cb_dz.bind('<FocusOut>',
+                         lambda _e: self._apply_rowhandle('DestinationZone',
+                                                           self.v_dz.get()))
+        attach_tooltip(self.cb_dz, 'conn_dest_zone')
+
+        # Orphan / status feedback
+        self.v_status = tk.StringVar(value='')
+        ttk.Label(d, textvariable=self.v_status,
+                  foreground=self.app.COLOR_MUTED, justify=tk.LEFT,
+                  wraplength=520).pack(fill=tk.X, pady=(8, 0), anchor='w')
+
+    # ---------- tree population ----------
+    def _populate_tree(self):
+        if not self.doc:
+            return
+        for iid in self.tree.get_children(''):
+            self.tree.delete(iid)
+
+        lm_holders = self._build_landmark_holders()
+
+        # Refresh combobox option lists in case zones / landmarks changed
+        try:
+            self.cb_olm['values'] = self._all_landmark_names()
+            self.cb_dlm['values'] = self._all_landmark_names()
+            self.cb_oz['values'] = self._all_zone_names()
+            self.cb_dz['values'] = self._all_zone_names()
+        except Exception: pass
+
+        filt_zs = self.v_filter_zoneset.get()
+        filt_state = self.v_filter_state.get()
+        orphans_only = self.v_orphans_only.get()
+
+        n_total = 0; n_visible = 0; n_orphan = 0
+        for r in self.doc.rows:
+            n_total += 1
+            zs = self._get_enum_short(r, 'ZoneSet')
+            es = self._get_enum_short(r, 'EnabledState')
+            is_orphan, reason = self._row_orphan_status(r, lm_holders)
+            if is_orphan: n_orphan += 1
+
+            if filt_zs not in ('(any)', '') and zs != filt_zs: continue
+            if filt_state not in ('(any)', '') and es != filt_state: continue
+            if orphans_only and not is_orphan: continue
+
+            req = self._get_bool(r, 'bRequired')
+            exc = self._get_bool(r, 'bExclusive')
+            flags_str = ('R' if req else '-') + ('X' if exc else '-')
+
+            tags = []
+            if es == 'Disabled':
+                tags.append(DISABLED_TAG)
+            if is_orphan:
+                tags.append('orphan')
+
+            self.tree.insert('', 'end', iid=r['Name'], values=(
+                r['Name'],
+                zs,
+                es,
+                self._get_rowname(r, 'OriginLandmark') or '',
+                self._get_rowname(r, 'OriginZone') or '',
+                self._get_rowname(r, 'DestinationLandmark') or '',
+                self._get_rowname(r, 'DestinationZone') or '',
+                self._get_enum_short(r, 'ZoneRule'),
+                flags_str,
+            ), tags=tuple(tags))
+            n_visible += 1
+
+        self.status_lbl.config(
+            text=f'{n_visible}/{n_total} rows  ·  {n_orphan} orphan(s)')
+        self.apply_sort(self.tree)
+
+    # ---------- selection ----------
+    def _on_select(self, _=None):
+        sel = self.tree.selection()
+        if not sel:
+            self.current_row = None
+            return
+        name = sel[0]
+        if not self.doc: return
+        for r in self.doc.rows:
+            if r.get('Name') == name:
+                self.current_row = r
+                self._populate_detail(r)
+                return
+
+    def _populate_detail(self, r):
+        self._updating = True
+        try:
+            self.v_name.set(r.get('Name', '?'))
+            self.v_zoneset.set(self._get_enum_short(r, 'ZoneSet'))
+            self.v_state.set(self._get_enum_short(r, 'EnabledState') or 'Live')
+            self.v_required.set(self._get_bool(r, 'bRequired'))
+            self.v_exclusive.set(self._get_bool(r, 'bExclusive'))
+            self.v_leaf.set(self._get_bool(r, 'bLeafZoneRoute'))
+            self.v_rule.set(self._get_enum_short(r, 'ZoneRule'))
+            self.v_okind.set(self._get_enum_short(r, 'OriginKind'))
+            self.v_dkind.set(self._get_enum_short(r, 'DestinationKind'))
+            self.v_olm.set(self._get_rowname(r, 'OriginLandmark') or 'None')
+            self.v_oz.set(self._get_rowname(r, 'OriginZone') or 'None')
+            self.v_dlm.set(self._get_rowname(r, 'DestinationLandmark') or 'None')
+            self.v_dz.set(self._get_rowname(r, 'DestinationZone') or 'None')
+            # status / orphan reason
+            lm_holders = self._build_landmark_holders()
+            is_orphan, reason = self._row_orphan_status(r, lm_holders)
+            if is_orphan:
+                self.v_status.set('⚠ Orphan: ' + reason +
+                                   '  — this connection will null-deref the '
+                                   'router. Disable it OR clear the bad '
+                                   'endpoint OR attach the landmark to a '
+                                   'Live SS zone.')
+            else:
+                self.v_status.set('')
+        finally:
+            self._updating = False
+
+    # ---------- write helpers ----------
+    def _ensure_namemap(self, *values):
+        nm = self.doc.data.get('NameMap', [])
+        added = False
+        for v in values:
+            if v and v not in nm:
+                nm.append(v); added = True
+        if added:
+            n = len(nm)
+            self.doc.data['NamesReferencedFromExportDataCount'] = n
+            g = self.doc.data.get('Generations') or []
+            if g and isinstance(g[0], dict):
+                g[0]['NameCount'] = n
+
+    def _apply_enum(self, fld, prefix, short_value):
+        if self._updating or self.current_row is None: return
+        if not short_value: return
+        full = prefix + short_value
+        p = self._fp(self.current_row['Value'], fld)
+        if p is None: return
+        p['Value'] = full
+        self._ensure_namemap(full, prefix.rstrip(':'))
+        self._refresh_row()
+        self.app.refresh_status()
+
+    def _apply_bool(self, fld, value):
+        if self._updating or self.current_row is None: return
+        p = self._fp(self.current_row['Value'], fld)
+        if p is None: return
+        p['Value'] = bool(value)
+        self._refresh_row()
+        self.app.refresh_status()
+
+    def _apply_rowhandle(self, fld, new_target):
+        if self._updating or self.current_row is None: return
+        p = self._fp(self.current_row['Value'], fld)
+        if p is None: return
+        v = p.get('Value')
+        target = new_target.strip() if new_target else 'None'
+        if not target: target = 'None'
+        if isinstance(v, list):
+            for it in v:
+                if isinstance(it, dict) and it.get('Name') == 'RowName':
+                    it['Value'] = target
+                    break
+        # NameMap completeness — make sure target is registered
+        if target and target != 'None':
+            self._ensure_namemap(target)
+        self._refresh_row()
+        # Refresh the orphan status indicator on the detail panel
+        lm_holders = self._build_landmark_holders()
+        is_orphan, reason = self._row_orphan_status(self.current_row, lm_holders)
+        if is_orphan:
+            self.v_status.set('⚠ Orphan: ' + reason)
+        else:
+            self.v_status.set('')
+        self.app.refresh_status()
+
+    def _refresh_row(self):
+        if not self.current_row: return
+        name = self.current_row.get('Name')
+        if not name or not self.tree.exists(name): return
+        zs = self._get_enum_short(self.current_row, 'ZoneSet')
+        es = self._get_enum_short(self.current_row, 'EnabledState')
+        req = self._get_bool(self.current_row, 'bRequired')
+        exc = self._get_bool(self.current_row, 'bExclusive')
+        lm_holders = self._build_landmark_holders()
+        is_orphan, _ = self._row_orphan_status(self.current_row, lm_holders)
+        flags_str = ('R' if req else '-') + ('X' if exc else '-')
+        tags = []
+        if es == 'Disabled': tags.append(DISABLED_TAG)
+        if is_orphan: tags.append('orphan')
+        self.tree.item(name, values=(
+            name, zs, es,
+            self._get_rowname(self.current_row, 'OriginLandmark') or '',
+            self._get_rowname(self.current_row, 'OriginZone') or '',
+            self._get_rowname(self.current_row, 'DestinationLandmark') or '',
+            self._get_rowname(self.current_row, 'DestinationZone') or '',
+            self._get_enum_short(self.current_row, 'ZoneRule'),
+            flags_str,
+        ), tags=tuple(tags))
+
+    # ---- Row CRUD ----
+    def _add_connection_row(self):
+        if not self.doc or not self.doc.rows:
+            messagebox.showerror('Error', 'No template row available.'); return
+        name = simpledialog.askstring('Add Connection', 'Row name:', parent=self)
+        if not name: return
+        name = name.strip()
+        if not name: return
+        if any(r.get('Name') == name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Connection "{name}" already exists.'); return
+        new_row = copy.deepcopy(self.doc.rows[0])
+        new_row['Name'] = name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(name):
+            self.tree.selection_set(name); self.tree.see(name)
+        self.app.refresh_status()
+
+    def _copy_connection_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a connection to copy.'); return
+        src_name = sel[0]
+        src = next((r for r in self.doc.rows if r.get('Name') == src_name), None)
+        if src is None: return
+        new_name = simpledialog.askstring(
+            'Copy Connection', f'New row name (copying from "{src_name}"):',
+            initialvalue=f'{src_name}_copy', parent=self)
+        if not new_name: return
+        new_name = new_name.strip()
+        if not new_name: return
+        if any(r.get('Name') == new_name for r in self.doc.rows):
+            messagebox.showerror('Error', f'Connection "{new_name}" already exists.'); return
+        new_row = copy.deepcopy(src)
+        new_row['Name'] = new_name
+        self.doc.rows.append(new_row)
+        self.doc.reconcile_namemap()
+        self.refresh_from_doc()
+        if self.tree.exists(new_name):
+            self.tree.selection_set(new_name); self.tree.see(new_name)
+        self.app.refresh_status()
+
+    def _delete_connection_row(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning('Nothing selected', 'Select a connection to delete.'); return
+        name = sel[0]
+        if not messagebox.askyesno('Delete connection', f'Delete connection "{name}"?'):
+            return
+        self.doc.rows[:] = [r for r in self.doc.rows if r.get('Name') != name]
+        self.doc.reconcile_namemap()
+        self.current_row = None
+        self.refresh_from_doc()
+        self.app.refresh_status()
+
+
+# -----------------------------------------------------------------------------
 # LEVELS TAB — top-to-bottom chart of the SandboxSmall stack
 # -----------------------------------------------------------------------------
 
@@ -5579,12 +7158,15 @@ class LevelsTab(BaseTab):
                 cnt,
             ), tags=('bridge',))
 
-        # Visually mark ground, empty rows, and outdoor bridge chapters
+        # Subtle visual markers — no heavy backgrounds. The user reported
+        # the previous styling made rows hard to read.
         try:
-            self.tree.tag_configure('ground', background='#1f2733')
-            self.tree.tag_configure('empty', foreground='#c0392b')
-            self.tree.tag_configure('bridge', foreground='#27ae60',
-                                    background='#152018')
+            # Ground row: faint italic-style emphasis via slightly muted text
+            self.tree.tag_configure('ground', foreground='#3d6cb9')
+            # Empty chapter: orange (warning, not error)
+            self.tree.tag_configure('empty', foreground='#d68910')
+            # Outdoor / bridge: muted grey-green
+            self.tree.tag_configure('bridge', foreground='#7a9a7a')
         except Exception:
             pass
 
@@ -6436,6 +8018,7 @@ class WorldGenApp(tk.Tk):
         self.strings_tab = StringsTab(self.nb, self)
         self.mappings_tab = MappingsTab(self.nb, self)
         self.history_tab = HistoryTab(self.nb, self)
+        self.connections_tab = LayoutConnectionsTab(self.nb, self)
         self.levels_tab = LevelsTab(self.nb, self)
         self.map_tab = MapTab(self.nb, self)
 
@@ -6448,6 +8031,7 @@ class WorldGenApp(tk.Tk):
         self.nb.add(self.strings_tab, text='  Strings  ')
         self.nb.add(self.mappings_tab, text='  Mappings  ')
         self.nb.add(self.history_tab, text='  History  ')
+        self.nb.add(self.connections_tab, text='  Connections  ')
         self.nb.add(self.levels_tab, text='  Levels  ')
         self.nb.add(self.map_tab, text='  Map  ')
 
@@ -6462,6 +8046,8 @@ class WorldGenApp(tk.Tk):
             self.history_tab._populate()
         elif sel == str(self.levels_tab):
             self.levels_tab._populate()
+        elif sel == str(self.connections_tab):
+            self.connections_tab._populate_tree()
 
     def _build_statusbar(self):
         ttk.Separator(self, orient='horizontal').pack(side=tk.BOTTOM, fill=tk.X)
@@ -6488,7 +8074,7 @@ class WorldGenApp(tk.Tk):
         for tab in (self.zone_tab, self.chapter_tab, self.biome_tab,
                     self.bubble_tab, self.filter_tab, self.landmark_tab,
                     self.strings_tab, self.mappings_tab, self.history_tab,
-                    self.levels_tab, self.map_tab):
+                    self.connections_tab, self.levels_tab, self.map_tab):
             tab.refresh_from_doc()
         self.refresh_status()
 
@@ -6504,7 +8090,7 @@ class WorldGenApp(tk.Tk):
         for tab in (self.zone_tab, self.chapter_tab, self.biome_tab,
                     self.bubble_tab, self.filter_tab, self.landmark_tab,
                     self.strings_tab, self.mappings_tab, self.history_tab,
-                    self.levels_tab, self.map_tab):
+                    self.connections_tab, self.levels_tab, self.map_tab):
             tab.refresh_from_doc()
         self.refresh_status()
         if saved:
@@ -6513,9 +8099,32 @@ class WorldGenApp(tk.Tk):
             messagebox.showinfo('Nothing to save', 'No unsaved changes.')
 
     def _show_validation_dialog(self, issues, fixable, unfixable_errors,
-                                 has_errors):
-        """Show validator results via plain messagebox (this version
-        builds reliably). Returns 'fix' | 'skip' | 'cancel'.
+                                 has_errors, validator=None):
+        """Dispatch to the new Toplevel dialog or the legacy messagebox.
+
+        Returns 'fix' | 'skip' | 'cancel'. When `validator` is supplied
+        and the new UI is enabled, auto-fixes are applied INSIDE the
+        dialog (in place, with re-validation), so the caller does not
+        need to call validator.auto_fix() again on a 'fix' result —
+        instead the result is 'skip' (proceed) or 'cancel'.
+        """
+        if USE_NEW_VALIDATOR_UI and validator is not None:
+            return self._show_validation_dialog_new(issues, validator)
+        return self._show_validation_dialog_legacy(
+            issues, fixable, unfixable_errors, has_errors)
+
+    def _show_validation_dialog_new(self, issues, validator):
+        """Custom Toplevel: scrollable list, per-issue checkboxes for
+        auto-fix selection, Apply/Build/Cancel row. Re-validates in
+        place when fixes are applied. Returns 'skip' | 'cancel'
+        (fixes are already applied + saved before returning 'skip')."""
+        dlg = _ValidationDialog(self, issues, validator)
+        return dlg.result  # 'skip' or 'cancel'
+
+    def _show_validation_dialog_legacy(self, issues, fixable,
+                                        unfixable_errors, has_errors):
+        """Legacy messagebox flow — kept behind USE_NEW_VALIDATOR_UI as
+        a fallback. Returns 'fix' | 'skip' | 'cancel'.
         """
         # Compose plain-English summary
         n_err = sum(1 for i in issues if i.severity == 'error')
@@ -6610,7 +8219,8 @@ class WorldGenApp(tk.Tk):
         unfixable_errors = [i for i in errors if not i.fixer]
 
         choice = self._show_validation_dialog(
-            issues, fixable, unfixable_errors, has_errors=bool(errors))
+            issues, fixable, unfixable_errors, has_errors=bool(errors),
+            validator=validator)
 
         if choice == 'cancel':
             return False
