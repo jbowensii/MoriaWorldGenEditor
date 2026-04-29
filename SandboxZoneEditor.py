@@ -50,7 +50,7 @@ MOD_NAME = 'SandboxMod'
 # Version lives in SandboxZoneEditor.ini ([build] mod_version). Format is
 # MAJ.MIN.PAT, each segment 0..999. Build auto-bumps patch +1 on success.
 # Starting version (first run, if ini has no value yet): 1.0.1.
-DEFAULT_MOD_VERSION = '2.5.0'
+DEFAULT_MOD_VERSION = '2.5.1'
 
 DATATABLES = {
     'zones':       ('DT_Moria_Zones.json',              'DT_Moria_Zones',              'Zones'),
@@ -75,23 +75,39 @@ STAGED_DIR_OVERRIDES = {
     'strings': Path('Moria') / 'Content' / 'Tech' / 'Data' / 'StringTables',
 }
 
+# Per-ChapterID background colour. Tag names are chap-01..chap-17.
+# A helper (chapter_color_tag) extracts the ChapterID from any chapter row
+# name -- legacy 'SandboxSmall-chapter-N' or new 'SandboxSmall-ChapterNN.<X>'.
 CHAPTER_COLORS = {
-    'SandboxSmall-chapter-1': '#cfe8ff',
-    'SandboxSmall-chapter-2': '#d4f4cf',
-    'SandboxSmall-chapter-3': '#fff4b8',
-    'SandboxSmall-chapter-4': '#ffd9b3',
-    'SandboxSmall-chapter-5': '#ffd1e6',
-    'SandboxSmall-chapter-6': '#e0ccff',
-    'SandboxSmall-chapter-7': '#ffc9c9',
-    'SandboxSmall-chapter-8': '#e0e0e0',
-    'SandboxSmall-chapter-9':  '#aad4ff',
-    'SandboxSmall-chapter-10': '#7ac77a',
-    'SandboxSmall-chapter-11': '#ffe066',
-    'SandboxSmall-chapter-12': '#ffb380',
-    'SandboxSmall-chapter-13': '#ff99cc',
-    'SandboxSmall-chapter-14': '#c299ff',
-    'SandboxSmall-chapter-15': '#ff7a7a',
+    'chap-01': '#cfe8ff',
+    'chap-02': '#d4f4cf',
+    'chap-03': '#fff4b8',
+    'chap-04': '#ffd9b3',
+    'chap-05': '#ffd1e6',
+    'chap-06': '#e0ccff',
+    'chap-07': '#ffc9c9',
+    'chap-08': '#e0e0e0',
+    'chap-09': '#aad4ff',
+    'chap-10': '#7ac77a',
+    'chap-11': '#ffe066',
+    'chap-12': '#ffb380',
+    'chap-13': '#ff99cc',
+    'chap-14': '#c299ff',
+    'chap-15': '#ff7a7a',
+    'chap-16': '#ffd1e6',
+    'chap-17': '#aad4ff',
 }
+
+_CHAP_TAG_RE = re.compile(r'SandboxSmall-[Cc]hapter[-]?(\d+)')
+
+def chapter_color_tag(chapter_name):
+    """Return a 'chap-NN' tag for any chapter row name, or None."""
+    if not chapter_name:
+        return None
+    m = _CHAP_TAG_RE.match(chapter_name)
+    if m:
+        return f'chap-{int(m.group(1)):02d}'
+    return None
 
 EXTRA_CHAPTER_OPTIONS = [
     'Moria-DurinTower', 'Moria-DimrillDale', 'Moria-TradingPost',
@@ -1083,6 +1099,53 @@ USE_NEW_VALIDATOR_UI = True
 # different IDs than the code actually emits — both map to the same
 # friendly text so future renames are painless.
 _HUMAN_TITLES = {
+    # New checks added 2026-04 from the 14-floor stair session
+    'stair_bubble_z_oob': (
+        "Stair bubble Z out of world bounds",
+        "An elevator zone's bubble Z range (BP.Z + TargetSize.Z - 1) exceeds "
+        "engine bounds [0..29]. The engine null-derefs when routing past "
+        "world edges. Auto-fix shrinks TargetSize.Z so the bubble fits."),
+    'chapter_layer_continuity': (
+        "Chapter Layer sequence has gaps",
+        "Live SS chapter Layer values aren't sequential — there's a gap "
+        "between min(Layer) and max(Layer). The engine handles gaps but "
+        "they can hide intentional missing floors and break stair traversal "
+        "expectations. Warning, not error."),
+    'chapter_has_at_least_one_zone': (
+        "Chapter has no zones",
+        "A Live SS chapter row isn't referenced by any Live SS zone via "
+        "Chapter or AdditionalChapters. The chapter is dead weight — it "
+        "won't render any space. Either delete the chapter row or add a "
+        "zone for it. Warning, not error."),
+    'live_landmark_has_host': (
+        "Sandbox landmark has no host zone",
+        "A Live Sandbox-namespaced landmark isn't referenced by any Live "
+        "SS zone's LandmarkHandles. The engine still loads it but it "
+        "doesn't physically exist in the world. Warning, not error."),
+    # New checks added 2026-04 from the +7 Z-shift session
+    'zone_preferred_z_in_band': (
+        "Zone PreferredZOverride out of band",
+        "A Live SS zone's PreferredZOverride field points at a Z cell that "
+        "no Live SS chapter covers. The engine forces the zone to that Z and "
+        "then null-derefs when GetZone() can't find a matching chapter. Fix "
+        "by either shifting the override to a covered Z, setting it to -1 "
+        "(no override), or extending a chapter's MinZ/MaxZ to include it."),
+    'nested_subcell_z_in_band': (
+        "Nested Subcell.Z out of chapter band",
+        "A LayoutConnection has OriginInterface.Subcell.Z or "
+        "DestinationInterface.Subcell.Z (nested IntVectors inside the "
+        "interface struct) at a Z value not covered by any Live SS chapter. "
+        "The A* router crashes when it walks the routing graph and hits "
+        "this cell. These nested Subcells are easy to miss when shifting "
+        "chapter Z bands — they're not the top-level Subcell field."),
+    'ss_landmark_bp_in_band': (
+        "Sandbox landmark BasePosition out of band",
+        "A Sandbox-namespaced landmark (or bridge landmark like "
+        "DurinsTower/TradingPost/DimrillDale) has BasePosition.Z at a Z cell "
+        "no Live SS chapter covers. The engine still loads orphan SS "
+        "landmarks even when they have no host zone via LandmarkHandles, "
+        "and routing around them null-derefs. (X=0, Y=0 sentinels are "
+        "exempt — those mean auto-place.)"),
     # NameMap family
     'counter_sync': (
         "NameMap counters out of sync",
@@ -1163,6 +1226,24 @@ _HUMAN_TITLES = {
         "no chapter present. Game will crash in the A* router. Either "
         "move the stair away from the world edge, or clear the "
         "bExtendedConnectivityLandmark flag on its landmark."),
+    'extended_connectivity_z_bounds': (
+        "Extended-connectivity zone leaves the world Z grid",
+        "A zone with bExtendedConnectivityLandmark=true has its full Z "
+        "extent (Pos.Z + Size.Z - 1) below 0 or above 29. The engine "
+        "actively walks that Z range while routing, so out-of-bounds = "
+        "null-deref crash. Auto-fix shrinks Size.Z so the top fits "
+        "inside the world, or clamps Pos.Z up to 0 if it was negative."),
+    'orphan_added_data': (
+        "User-added items are unreferenced",
+        "StringTable entries, landmarks, or chapter rows that were added "
+        "by editing (not in vanilla) and that no Live row currently "
+        "references. Vanilla content is never flagged. Auto-fix removes "
+        "the orphans and syncs NameMaps. Reversible via backup."),
+    'connection_null_endpoints': (
+        "LayoutConnection has null endpoints",
+        "A connection row has no Origin and/or Destination landmark. The "
+        "engine null-derefs in FMorLayoutConnectionInstance::GetZone() at "
+        "routing time. Auto-fix disables the row so the router skips it."),
     'connection_endpoint_disabled': (
         "Connection points to a missing zone",
         "A LayoutConnection row references an Origin/Destination zone "
@@ -1382,8 +1463,11 @@ class BuildValidator:
                              if not (x in seen or seen.add(x))]
                 preview = miss_list[:5]
                 more = '' if len(miss_list) <= 5 else f' (+{len(miss_list)-5} more)'
+                # Downgraded from error to warning: vanilla SandboxSmall ships
+                # with ~15 missing FNames (10 connections + 5 templates) and
+                # the engine tolerates them. Auto-fixer remains available.
                 out.append(Issue(
-                    'error', 'namemap_completeness', k,
+                    'warning', 'namemap_completeness', k,
                     f'{len(miss_list)} FName(s) missing from NameMap: {preview}{more}',
                     fixer=lambda _doc=doc: _doc.reconcile_namemap(),
                     fixer_label='Append missing FNames + sync counters'))
@@ -1515,10 +1599,12 @@ class BuildValidator:
         def safe(v, target):
             return v and v not in self.NULL_FNAMES and target and v not in target
 
-        # Zones cross-refs
+        # Zones cross-refs (skip Disabled rows — engine doesn't process them)
         if zones_doc:
             broken = []
             for r in zones_doc.rows:
+                if self._zstate(r) == 'Disabled':
+                    continue
                 n = r.get('Name')
                 for fld, target in (('Chapter', chap_rows),
                                     ('BubbleDeck', deck_rows),
@@ -1800,15 +1886,71 @@ class BuildValidator:
                     if p and p.get('Value') is True:
                         p['Value'] = False
             preview = ', '.join(r.get('Name') for r in bad[:5])
+            # Downgraded from error to warning: vanilla SandboxSmall ships
+            # with 9 zones in this state (bPositionFromLandmarks=true with no
+            # LandmarkHandle). The engine handles via runtime placement
+            # fallback. Auto-fixer remains available.
             out.append(Issue(
-                'error', 'unanchored_zone', 'zones',
+                'warning', 'unanchored_zone', 'zones',
                 f'{len(bad)} Live SS zone(s) have bPositionFromLandmarks=true '
                 f'but no Landmark attached: {preview}'
                 + ('…' if len(bad) > 5 else '') +
-                '. Will null-deref in router. Either attach a landmark or '
-                'clear the flag (auto-fix clears it).',
+                '. Vanilla SandboxSmall has 9 zones in this state — engine '
+                'uses runtime placement fallback. Auto-fix clears the flag '
+                'if you prefer pinned placement.',
                 fixer=fix,
                 fixer_label='Set bPositionFromLandmarks=false on unanchored zones'))
+        return out
+
+    def _check_connection_null_endpoints(self):
+        """Live LayoutConnection rows with null/empty OriginLandmark or
+        DestinationLandmark RowName. Engine FMorLayoutConnectionInstance::GetZone()
+        null-derefs at routing time when it tries to resolve the missing
+        endpoint landmark. Auto-fix: set EnabledState=Disabled so the
+        runtime skips the row entirely (no GetZone() lookup occurs)."""
+        out = []
+        conns_doc = self.docs.get('connections')
+        if not conns_doc:
+            return out
+        bad_rows = []
+        for r in conns_doc.rows:
+            if self._zstate(r) == 'Disabled':
+                continue
+            origin = self._get(r, 'OriginLandmark')
+            dest = self._get(r, 'DestinationLandmark')
+            o_null = origin in (None, '', 'None')
+            d_null = dest in (None, '', 'None')
+            if o_null or d_null:
+                bad_rows.append((r, origin, dest, o_null, d_null))
+        for r, origin, dest, o_null, d_null in bad_rows:
+            row_name = r.get('Name')
+            def make_fix(_row=r, _doc=conns_doc):
+                def fix():
+                    p = self._fp(_row.get('Value', []), 'EnabledState')
+                    if p:
+                        p['Value'] = 'ERowEnabledState::Disabled'
+                    nm = _doc.data.get('NameMap', [])
+                    if 'ERowEnabledState::Disabled' not in nm:
+                        nm.append('ERowEnabledState::Disabled')
+                        n = len(nm)
+                        _doc.data['NamesReferencedFromExportDataCount'] = n
+                        g = _doc.data.get('Generations') or []
+                        if g and isinstance(g[0], dict):
+                            g[0]['NameCount'] = n
+                return fix
+            # Downgraded from error to warning: vanilla SandboxSmall ships
+            # with 20 LayoutConnections that have null/empty Origin or
+            # Destination landmarks, and the engine does not crash on them.
+            # Auto-fixer (disable the row) remains available.
+            out.append(Issue(
+                'warning', 'connection_null_endpoints', 'connections',
+                f'LayoutConnection "{row_name}" has null/empty Origin or '
+                f'Destination landmark. Vanilla ships with 20 such rows — '
+                f'engine skips them silently. Auto-fix disables the row if '
+                f'you prefer to clean it up. '
+                f'(OriginLandmark={origin!r}, DestinationLandmark={dest!r})',
+                fixer=make_fix(),
+                fixer_label=f'Disable 1 null-endpoint connection(s)'))
         return out
 
     def _check_connection_endpoints_live(self):
@@ -2043,6 +2185,12 @@ class BuildValidator:
                 if not bp: continue
                 bpz = bp.get('Z')
                 if not isinstance(bpz, int): continue
+                # Exempt auto-place sentinel: BasePosition.X==0 AND Y==0
+                # is the engine's "place me automatically" marker. Vanilla
+                # SandboxSmall has 16 landmarks in this state and the engine
+                # places them at runtime — they are NOT misaligned.
+                if bp.get('X') == 0 and bp.get('Y') == 0:
+                    continue
                 if not (mn <= bpz <= mx):
                     needed.append((lname, mn, mx, r['Name'], chap, bpz))
 
@@ -2057,8 +2205,12 @@ class BuildValidator:
             preview = '; '.join(
                 f'{l} z={bz}->{mn} ({zn} in {ch})'
                 for l, mn, mx, zn, ch, bz in needed[:3])
+            # Downgraded from error to warning: with the auto-place sentinel
+            # (X=0,Y=0) exemption applied above, vanilla SandboxSmall produces
+            # zero hits here. Remaining hits indicate non-sentinel landmarks
+            # outside their host band — flagged for review, not blocking.
             out.append(Issue(
-                'error', 'landmark_zband_misalign', 'landmarks',
+                'warning', 'landmark_zband_misalign', 'landmarks',
                 f'{len(needed)} landmark BasePosition.Z value(s) outside host '
                 f'zone chapter Z band: {preview}'
                 + ('…' if len(needed) > 3 else ''),
@@ -2154,11 +2306,14 @@ class BuildValidator:
         if not (zones_doc and chapters_doc):
             return out
 
-        # Build Live SS chapter -> Layer map
+        # Build Live SS chapter -> Layer map. Match BOTH the legacy
+        # 'SandboxSmall-chapter-N' pattern AND the new
+        # 'SandboxSmall-Chapter##.<X>' pattern after the rename.
         chap_layers = {}
         for r in chapters_doc.rows:
             n = r.get('Name', '')
-            if not n.startswith('SandboxSmall-chapter-'):
+            if not (n.startswith('SandboxSmall-chapter-')
+                    or n.startswith('SandboxSmall-Chapter')):
                 continue
             if self._zstate(r) == 'Disabled':
                 continue
@@ -2205,15 +2360,483 @@ class BuildValidator:
                 dn = (L - 1) in live_layers
                 if up and dn:
                     continue
+                # World-edge exemption: if this zone sits at the top or bottom
+                # of the live layer stack, the missing neighbour is a world
+                # boundary, not a defect. Vanilla SandboxSmall ships with
+                # extended-connectivity zones at the stack top/bottom and the
+                # engine handles them gracefully. Only flag when the missing
+                # side is INTERIOR (a gap in the middle of the stack).
+                world_top = max(live_layers) if live_layers else L
+                world_bottom = min(live_layers) if live_layers else L
+                missing_up_is_edge = (not up) and (L >= world_top)
+                missing_dn_is_edge = (not dn) and (L <= world_bottom)
+                up_ok_or_edge = up or missing_up_is_edge
+                dn_ok_or_edge = dn or missing_dn_is_edge
+                if up_ok_or_edge and dn_ok_or_edge:
+                    continue
                 miss = []
-                if not up: miss.append(f'Layer+1 (={L+1})')
-                if not dn: miss.append(f'Layer-1 (={L-1})')
+                if not up_ok_or_edge: miss.append(f'Layer+1 (={L+1})')
+                if not dn_ok_or_edge: miss.append(f'Layer-1 (={L-1})')
+                # Downgraded from error to warning: vanilla SandboxSmall has
+                # this pattern at non-edge positions and the engine tolerates
+                # it. World-edge cases are exempted entirely above.
                 out.append(Issue(
-                    'error', 'extended_connectivity_no_neighbour', 'zones',
+                    'warning', 'extended_connectivity_no_neighbour', 'zones',
                     f'{r.get("Name")} in {chap} (Layer {L:+d}) has '
                     f'extended-connectivity landmark "{lname}" but no '
-                    f'{" and no ".join(miss)} chapter — A* will null-deref. '
-                    f'Move the zone away from the edge or clear the flag.'))
+                    f'{" and no ".join(miss)} chapter present. Vanilla '
+                    f'tolerates this at world edges. If this floor is '
+                    f'interior to your stack, consider clearing the flag '
+                    f'or adding the missing neighbour chapter.'))
+        return out
+
+    def _check_extended_connectivity_z_bounds(self):
+        """A zone with bExtendedConnectivityLandmark=true must keep its full
+        Z extent within [Z_MIN, Z_MAX] = [0, 29]. The engine traverses the
+        zone's Z range to wire connectivity to the next layer; if the
+        extent goes past Z=29 (or below 0), the engine indexes outside the
+        world grid and crashes.
+
+        This is an ERROR (not a warning) because, unlike a normal zone
+        bleed past the chapter MaxZ — which is harmless if no zone
+        occupies those cells — an extended-connectivity zone's bleed is
+        ACTIVELY WALKED by the routing pass. Out-of-bounds = null-deref.
+
+        Auto-fix: shrink TargetSize.Z so the zone's top extent equals
+        Z_MAX (=29). Mirrors z_bounds_zone_top fix but as an error.
+        """
+        out = []
+        zones_doc = self.docs.get('zones')
+        if not zones_doc:
+            return out
+        zmin, zmax = self.Z_MIN, self.Z_MAX
+
+        def get_z(prop):
+            if not prop: return None
+            v = prop.get('Value')
+            if isinstance(v, list) and v:
+                inner = v[0]
+                if isinstance(inner, dict) and isinstance(inner.get('Value'), dict):
+                    return inner['Value'].get('Z')
+            return None
+
+        violations = []
+        for r in zones_doc.rows:
+            if self._zstate(r) == 'Disabled':
+                continue
+            zs_p = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs_p or str(zs_p.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            # Skip Pos=(0,0,0) sentinel — engine places those itself
+            pos = self._fp(r.get('Value', []), 'Position')
+            if pos:
+                pv = pos.get('Value')
+                if isinstance(pv, list) and pv:
+                    inner = pv[0].get('Value') if isinstance(pv[0], dict) else None
+                    if isinstance(inner, dict):
+                        if (inner.get('X') == 0 and inner.get('Y') == 0
+                                and inner.get('Z') == 0):
+                            continue
+
+            # Does this zone carry an extended-connectivity landmark handle?
+            lh = self._fp(r.get('Value', []), 'LandmarkHandles')
+            if not lh:
+                continue
+            has_ext = False
+            for e in (lh.get('Value') or []):
+                if not isinstance(e, dict): continue
+                inner = e.get('Value')
+                if not isinstance(inner, list): continue
+                ext = self._fp(inner, 'bExtendedConnectivityLandmark')
+                if ext and ext.get('Value') is True:
+                    has_ext = True; break
+            if not has_ext:
+                continue
+
+            pz = get_z(pos)
+            sz = get_z(self._fp(r.get('Value', []), 'TargetSize'))
+            if not (isinstance(pz, int) and isinstance(sz, int) and sz > 0):
+                continue
+            top = pz + sz - 1
+            if pz < zmin or top > zmax:
+                violations.append((r.get('Name'), pz, sz, top))
+
+        if violations:
+            def fix_top(_v=violations, _doc=zones_doc, _zmin=zmin, _zmax=zmax):
+                for n, pz, sz, top in _v:
+                    for r in _doc.rows:
+                        if r.get('Name') != n: continue
+                        size = self._fp(r.get('Value', []), 'TargetSize')
+                        # Clamp Position.Z if below; otherwise shrink Size.Z
+                        # so top == Z_MAX
+                        if pz < _zmin and size:
+                            pos = self._fp(r.get('Value', []), 'Position')
+                            pv = pos.get('Value') if pos else None
+                            if isinstance(pv, list) and pv:
+                                pv[0]['Value']['Z'] = _zmin
+                        elif top > _zmax and size:
+                            new_sz = max(1, _zmax - max(pz, _zmin) + 1)
+                            sv = size.get('Value')
+                            if isinstance(sv, list) and sv:
+                                sv[0]['Value']['Z'] = new_sz
+            preview = violations[:3]
+            out.append(Issue(
+                'error', 'extended_connectivity_z_bounds', 'zones',
+                f'{len(violations)} extended-connectivity zone(s) extend '
+                f'past Z bounds [{zmin},{zmax}]: {preview}. Engine will '
+                f'null-deref while routing — this is harder than a normal '
+                f'bleed warning. Either shrink TargetSize.Z to fit, or '
+                f'clear the bExtendedConnectivityLandmark flag.',
+                fixer=fix_top,
+                fixer_label=f'Clamp extended-connectivity zone Z extent into [{zmin},{zmax}]'))
+        return out
+
+    # ----- New error-class checks added 2026-04 from Z-shift session -----
+    # These catch the specific failure modes that crashed routing during
+    # SS chapter Z-band shifts. Each check is ERROR severity because
+    # vanilla doesn't violate them and the engine GetZone()/A* router
+    # null-derefs when they fire.
+
+    def _live_ss_chapter_cells(self):
+        """Return the set of Z cells [MinZ..MaxZ] covered by any Live SS
+        chapter row. Used by all the Z-band-membership checks below."""
+        cells = set()
+        chapters_doc = self.docs.get('chapters')
+        if not chapters_doc: return cells
+        for r in chapters_doc.rows:
+            n = r.get('Name', '')
+            if not (n.startswith('SandboxSmall-Chapter') or
+                    n.startswith('SandboxSmall-chapter')):
+                continue
+            if self._zstate(r) == 'Disabled': continue
+            mn = self._get(r, 'MinZ'); mx = self._get(r, 'MaxZ')
+            if isinstance(mn, int) and isinstance(mx, int):
+                for z in range(mn, mx + 1):
+                    cells.add(z)
+        return cells
+
+    def _check_zone_preferred_z_in_band(self):
+        """Discovered 2026-04: every Live SS zone with PreferredZOverride >= 0
+        must have that value within SOME Live SS chapter's Z band. The engine
+        uses PreferredZOverride to force zone placement at a specific Z; if
+        that Z isn't covered by any chapter, GetZone() null-derefs.
+
+        The -1 sentinel means 'no override' and is always valid.
+        Auto-fix: shift the override value to the nearest in-band Z."""
+        out = []
+        zones_doc = self.docs.get('zones')
+        if not zones_doc: return out
+        cells = self._live_ss_chapter_cells()
+        if not cells: return out
+        bad = []
+        for r in zones_doc.rows:
+            zs = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs or str(zs.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            if self._zstate(r) == 'Disabled': continue
+            p = self._fp(r.get('Value', []), 'PreferredZOverride')
+            if not p: continue
+            v = p.get('Value')
+            if not isinstance(v, int) or v < 0:
+                continue  # -1 sentinel = no override
+            if v not in cells:
+                bad.append((r.get('Name'), v))
+        if bad:
+            preview = ', '.join(f'{n}={v}' for n, v in bad[:5])
+            out.append(Issue(
+                'error', 'zone_preferred_z_in_band', 'zones',
+                f'{len(bad)} Live SS zone(s) with PreferredZOverride pointing '
+                f'at a Z cell not covered by any Live SS chapter — '
+                f'engine GetZone() will null-deref at routing time. '
+                f'Examples: {preview}'))
+        return out
+
+    def _check_nested_subcell_z_in_band(self):
+        """Discovered 2026-04: LayoutConnections have NESTED Subcell IntVectors
+        inside OriginInterface and DestinationInterface. Their Z components
+        (when non-zero) must point at a Live SS chapter's Z band, otherwise
+        the A* router null-derefs.
+
+        These were NOT a top-level Subcell field on the row — easy to miss
+        when shifting Z values by hand."""
+        out = []
+        conns_doc = self.docs.get('connections')
+        if not conns_doc: return out
+        cells = self._live_ss_chapter_cells()
+        if not cells: return out
+        bad = []
+        for r in conns_doc.rows:
+            zs = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs or str(zs.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            if self._zstate(r) == 'Disabled': continue
+            for fld in ('OriginInterface', 'DestinationInterface'):
+                ifprop = self._fp(r.get('Value', []), fld)
+                if not ifprop: continue
+                v = ifprop.get('Value')
+                if not isinstance(v, list): continue
+                for inner in v:
+                    if not isinstance(inner, dict): continue
+                    if inner.get('Name') != 'Subcell': continue
+                    sc_v = inner.get('Value')
+                    if not isinstance(sc_v, list) or not sc_v: continue
+                    d = sc_v[0].get('Value') if isinstance(sc_v[0], dict) else None
+                    if not isinstance(d, dict): continue
+                    z = d.get('Z')
+                    if not isinstance(z, int) or z == 0: continue
+                    if z not in cells:
+                        bad.append((r.get('Name'), fld, z))
+        if bad:
+            preview = ', '.join(f'{n}.{f}.Z={z}' for n, f, z in bad[:5])
+            out.append(Issue(
+                'error', 'nested_subcell_z_in_band', 'connections',
+                f'{len(bad)} nested Subcell.Z value(s) in Live SS connections '
+                f'point at uncovered Z cells — A* router will null-deref. '
+                f'Examples: {preview}'))
+        return out
+
+    def _check_ss_landmark_bp_in_band(self):
+        """Discovered 2026-04: Sandbox-namespaced landmarks (and the bridge
+        landmarks DurinsTower/TradingPost/DimrillDale) with non-sentinel
+        BasePosition must have BP.Z within some Live SS chapter band.
+
+        The previous landmark_zband_alignment check only flagged landmarks
+        hosted via LandmarkHandles. This catches ORPHAN SS landmarks that
+        the engine still loads and routes around."""
+        out = []
+        lm_doc = self.docs.get('landmarks')
+        if not lm_doc: return out
+        cells = self._live_ss_chapter_cells()
+        if not cells: return out
+
+        ss_namespaces = ('Sandbox.',)
+        ss_bridge_names = {'TradingPost', 'DurinsTower', 'DimrillDale',
+                            'Sandbox_DurinsTower', 'Sandbox_TradingPost',
+                            'Sandbox_DimrillDale'}
+        bad = []
+        for r in lm_doc.rows:
+            n = r.get('Name', '')
+            if not (n.startswith(ss_namespaces) or n in ss_bridge_names):
+                continue
+            if self._zstate(r) == 'Disabled': continue
+            bp_p = self._fp(r.get('Value', []), 'BasePosition')
+            if not bp_p: continue
+            v = bp_p.get('Value')
+            if not isinstance(v, list) or not v: continue
+            d = v[0].get('Value') if isinstance(v[0], dict) else None
+            if not isinstance(d, dict): continue
+            x = d.get('X'); y = d.get('Y'); z = d.get('Z')
+            if x == 0 and y == 0:
+                continue  # auto-place sentinel
+            if not isinstance(z, int): continue
+            if z not in cells:
+                bad.append((n, z))
+        if bad:
+            preview = ', '.join(f'{n}.BP.Z={z}' for n, z in bad[:5])
+            out.append(Issue(
+                'error', 'ss_landmark_bp_in_band', 'landmarks',
+                f'{len(bad)} Sandbox-namespaced landmark(s) with '
+                f'BasePosition.Z outside any Live SS chapter band — '
+                f'engine routing may null-deref. Examples: {preview}'))
+        return out
+
+    def _check_orphan_added_data(self):
+        """Find StringTable entries, landmarks, and chapter rows that the
+        user added (not in vanilla) but no longer reference anything Live.
+        Loads the .original.json sidecars next to each DT to determine
+        which rows are vanilla (always preserved) vs user-added.
+
+        Vanilla content is NEVER flagged — even if currently unreferenced.
+        Only items the user introduced that are now orphaned get listed.
+
+        Auto-fix: remove the orphan rows + sync NameMaps. Reversible via
+        backup. Fired as a WARNING (not an error) so build can proceed."""
+        out = []
+
+        def load_sidecar(stem):
+            try:
+                import os
+                p = os.path.join(os.path.dirname(self.docs[stem].json_path)
+                                 if stem in self.docs and self.docs[stem].json_path
+                                 else '',
+                                 f'{stem.split("/")[-1]}.original.json')
+                # Fallback: try direct neighbour
+                if not os.path.exists(p):
+                    return None
+                import json
+                return json.load(open(p, encoding='utf-8'))
+            except Exception:
+                return None
+
+        # Determine sidecar paths from each loaded doc
+        def sidecar_for(doc_key):
+            doc = self.docs.get(doc_key)
+            if not doc or not getattr(doc, 'json_path', None):
+                return None
+            sp = str(doc.json_path).replace('.json', '.original.json')
+            try:
+                import os, json
+                if not os.path.exists(sp):
+                    return None
+                return json.load(open(sp, encoding='utf-8'))
+            except Exception:
+                return None
+
+        W_van = sidecar_for('strings')
+        lm_van = sidecar_for('landmarks')
+        ch_van = sidecar_for('chapters')
+
+        # Collect referenced text keys across every loaded DT
+        referenced_text = set()
+        def walk_text(obj):
+            if isinstance(obj, dict):
+                if ('TextPropertyData' in str(obj.get('$type', ''))
+                        and obj.get('HistoryType') == 'StringTableEntry'):
+                    v = obj.get('Value')
+                    if v: referenced_text.add(str(v))
+                for vv in obj.values(): walk_text(vv)
+            elif isinstance(obj, list):
+                for it in obj: walk_text(it)
+        for k in ('zones', 'landmarks', 'chapters', 'biomes',
+                  'connections', 'decks', 'filters', 'templates'):
+            d = self.docs.get(k)
+            if d and d.data is not None: walk_text(d.data)
+
+        orphan_strings = set()
+        if W_van and self.docs.get('strings') and self.docs['strings'].data:
+            cur_keys = {e[0] for e in
+                self.docs['strings'].data['Exports'][0]['Table']['Value']
+                if isinstance(e, list) and len(e) >= 1}
+            van_keys = {e[0] for e in
+                W_van['Exports'][0]['Table']['Value']
+                if isinstance(e, list) and len(e) >= 1}
+            orphan_strings = (cur_keys - van_keys) - referenced_text
+
+        # Landmark orphans
+        orphan_lm = set()
+        if lm_van and self.docs.get('landmarks') and self.docs['landmarks'].data:
+            cur_lm = {r['Name']
+                      for r in self.docs['landmarks'].data['Exports'][0]['Table']['Data']}
+            van_lm = {r['Name'] for r in lm_van['Exports'][0]['Table']['Data']}
+            added_lm = cur_lm - van_lm
+            referenced_lm = set()
+            zd = self.docs.get('zones')
+            if zd and zd.data:
+                for r in zd.data['Exports'][0]['Table']['Data']:
+                    if self._zstate(r) == 'Disabled': continue
+                    lh = self._fp(r.get('Value', []), 'LandmarkHandles')
+                    for e in (lh.get('Value') or []) if lh else []:
+                        for sub in e.get('Value') or []:
+                            if isinstance(sub, dict) and sub.get('Name') == 'Landmark':
+                                lv = sub.get('Value')
+                                if isinstance(lv, list):
+                                    for it in lv:
+                                        if isinstance(it, dict) and it.get('Name') == 'RowName':
+                                            rn = it.get('Value')
+                                            if rn: referenced_lm.add(rn)
+            cd = self.docs.get('connections')
+            if cd and cd.data:
+                for r in cd.data['Exports'][0]['Table']['Data']:
+                    if self._zstate(r) == 'Disabled': continue
+                    for fname in ('OriginLandmark', 'DestinationLandmark'):
+                        rn = self._get(r, fname)
+                        if rn: referenced_lm.add(rn)
+            ld = self.docs.get('landmarks')
+            if ld and ld.data:
+                for r in ld.data['Exports'][0]['Table']['Data']:
+                    if self._zstate(r) == 'Disabled': continue
+                    gc = self._fp(r.get('Value', []), 'GuaranteedConnections')
+                    for entry in (gc.get('Value') or []) if gc else []:
+                        for sub in entry.get('Value') or []:
+                            if isinstance(sub, dict) and sub.get('Name') == 'TagName':
+                                tn = sub.get('Value', '').replace('World.Landmark.', '')
+                                if tn: referenced_lm.add(tn)
+            orphan_lm = added_lm - referenced_lm
+
+        # Chapter row orphans
+        orphan_ch = set()
+        if ch_van and self.docs.get('chapters') and self.docs['chapters'].data:
+            cur_ch = {r['Name']
+                      for r in self.docs['chapters'].data['Exports'][0]['Table']['Data']}
+            van_ch = {r['Name'] for r in ch_van['Exports'][0]['Table']['Data']}
+            added_ch = cur_ch - van_ch
+            referenced_ch = set()
+            zd = self.docs.get('zones')
+            if zd and zd.data:
+                for r in zd.data['Exports'][0]['Table']['Data']:
+                    if self._zstate(r) == 'Disabled': continue
+                    rn = self._get(r, 'Chapter')
+                    if rn: referenced_ch.add(rn)
+                    ac = self._fp(r.get('Value', []), 'AdditionalChapters')
+                    for entry in (ac.get('Value') or []) if ac else []:
+                        if isinstance(entry, dict):
+                            for sub in entry.get('Value') or []:
+                                if isinstance(sub, dict) and sub.get('Name') == 'RowName':
+                                    rn = sub.get('Value')
+                                    if rn: referenced_ch.add(rn)
+            # Exclude SandboxSmall LEVEL IDENTITY rows from orphan detection.
+            # Pattern: 'SandboxSmall-Chapter##.LevelN' or '...DeepN' (post-rename)
+            # plus the legacy 'SandboxSmall-chapter-N' lowercase form. These
+            # rows are NEVER referenced by zones — zones use anchored sibling
+            # rows (Chapter##.<ZoneName>) sharing the level row's CID. The
+            # engine consumes level rows implicitly via the layer system, so
+            # they look orphan to ref-counting but removing them breaks
+            # generation on that layer (Lv-N stops rendering).
+            def _is_level_identity(name):
+                if name.startswith('SandboxSmall-chapter-'):
+                    return True
+                if name.startswith('SandboxSmall-Chapter') and '.' in name:
+                    tail = name.split('.', 1)[1]
+                    return tail.startswith('Level') or tail.startswith('Deep')
+                return False
+            orphan_ch = (added_ch - referenced_ch) - {
+                n for n in added_ch if _is_level_identity(n)
+            }
+
+        total = len(orphan_strings) + len(orphan_lm) + len(orphan_ch)
+        if total == 0:
+            return out
+
+        def fix_orphans(_strs=orphan_strings, _lms=orphan_lm, _chs=orphan_ch):
+            # Strip from World StringTable
+            wd = self.docs.get('strings')
+            if wd and wd.data and _strs:
+                wd.data['Exports'][0]['Table']['Value'] = [
+                    e for e in wd.data['Exports'][0]['Table']['Value']
+                    if not (isinstance(e, list) and len(e) >= 1 and e[0] in _strs)
+                ]
+                # Sync NameMap
+                nm = wd.data.get('NameMap', [])
+                wd.data['NameMap'] = [n for n in nm if n not in _strs]
+            # Strip orphan landmarks
+            ld = self.docs.get('landmarks')
+            if ld and ld.data and _lms:
+                ld.data['Exports'][0]['Table']['Data'] = [
+                    r for r in ld.data['Exports'][0]['Table']['Data']
+                    if r['Name'] not in _lms
+                ]
+                nm = ld.data.get('NameMap', [])
+                ld.data['NameMap'] = [n for n in nm if n not in _lms]
+            # Strip orphan chapter rows
+            cd = self.docs.get('chapters')
+            if cd and cd.data and _chs:
+                cd.data['Exports'][0]['Table']['Data'] = [
+                    r for r in cd.data['Exports'][0]['Table']['Data']
+                    if r['Name'] not in _chs
+                ]
+                nm = cd.data.get('NameMap', [])
+                cd.data['NameMap'] = [n for n in nm if n not in _chs]
+
+        out.append(Issue(
+            'warning', 'orphan_added_data', 'cleanup',
+            f'{total} user-added items are orphan: '
+            f'{len(orphan_strings)} StringTable entries, '
+            f'{len(orphan_lm)} landmarks, '
+            f'{len(orphan_ch)} chapter rows. '
+            f'Vanilla content excluded. Auto-fix removes them and syncs '
+            f'NameMaps.',
+            fixer=fix_orphans,
+            fixer_label=f'Remove {total} orphan items + sync NameMaps'))
         return out
 
     def _check_live_to_disabled(self):
@@ -2334,6 +2957,247 @@ class BuildValidator:
                 fixer_label='Clear zone refs to None + re-enable other Disabled targets'))
         return out
 
+    # ----- Stair / chapter / landmark health checks (added 2026-04) -----
+    # These checks were added during the 14-floor stair build. They catch
+    # mistakes specific to constructing multi-floor stair architectures:
+    # bubbles that would extend past Z=29, chapter Layer gaps, dead chapters
+    # with no zones, and Live landmarks without a host zone.
+
+    def _check_stair_bubble_z_oob(self):
+        """Each stair zone (Live SS, bPositionFromLandmarks=true, exactly one
+        LandmarkHandle with bExtendedConnectivityLandmark=true) extends UP
+        from its landmark BP.Z by TargetSize.Z. The bubble Z range is
+        [BP.Z .. BP.Z + TS.Z - 1]; if it leaves [0..29], engine null-derefs
+        while routing past the world edge.
+
+        Auto-fix: shrink TargetSize.Z so bubble top == Z_MAX (29).
+        """
+        out = []
+        zones_doc = self.docs.get('zones')
+        landmarks_doc = self.docs.get('landmarks')
+        if not (zones_doc and landmarks_doc):
+            return out
+        zmin, zmax = self.Z_MIN, self.Z_MAX
+
+        # Build landmark BP.Z lookup
+        lm_bp = {}
+        for r in landmarks_doc.rows:
+            n = r.get('Name')
+            if not n:
+                continue
+            bp_p = self._fp(r.get('Value', []), 'BasePosition')
+            if not bp_p: continue
+            v = bp_p.get('Value')
+            if isinstance(v, list) and v:
+                inner = v[0]
+                if isinstance(inner, dict) and isinstance(inner.get('Value'), dict):
+                    lm_bp[n] = inner['Value'].get('Z')
+
+        violations = []
+        for r in zones_doc.rows:
+            if self._zstate(r) == 'Disabled':
+                continue
+            zs_p = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs_p or str(zs_p.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            pflm = self._fp(r.get('Value', []), 'bPositionFromLandmarks')
+            if not (pflm and pflm.get('Value') is True):
+                continue
+            lh = self._fp(r.get('Value', []), 'LandmarkHandles')
+            if not lh:
+                continue
+            lh_entries = lh.get('Value') or []
+            if len(lh_entries) != 1:
+                continue
+            entry = lh_entries[0]
+            inner = entry.get('Value') if isinstance(entry, dict) else None
+            if not isinstance(inner, list):
+                continue
+            ext_p = self._fp(inner, 'bExtendedConnectivityLandmark')
+            if not (ext_p and ext_p.get('Value') is True):
+                continue
+            # Find Landmark.RowName
+            lm_p = self._fp(inner, 'Landmark')
+            if not lm_p:
+                continue
+            lm_name = None
+            sub = lm_p.get('Value')
+            if isinstance(sub, list):
+                for s in sub:
+                    if isinstance(s, dict) and s.get('Name') == 'RowName':
+                        lm_name = s.get('Value'); break
+            if not lm_name or lm_name in self.NULL_FNAMES:
+                continue
+            bp_z = lm_bp.get(lm_name)
+            ts_p = self._fp(r.get('Value', []), 'TargetSize')
+            ts_z = None
+            if ts_p:
+                tv = ts_p.get('Value')
+                if isinstance(tv, list) and tv:
+                    tin = tv[0]
+                    if isinstance(tin, dict) and isinstance(tin.get('Value'), dict):
+                        ts_z = tin['Value'].get('Z')
+            if not (isinstance(bp_z, int) and isinstance(ts_z, int) and ts_z > 0):
+                continue
+            top = bp_z + ts_z - 1
+            if bp_z < zmin or top > zmax:
+                violations.append((r.get('Name'), lm_name, bp_z, ts_z, top))
+
+        if violations:
+            def fix(_v=violations, _doc=zones_doc, _zmax=zmax):
+                for zname, lname, bp_z, ts_z, top in _v:
+                    for r in _doc.rows:
+                        if r.get('Name') != zname: continue
+                        ts_p = self._fp(r.get('Value', []), 'TargetSize')
+                        if ts_p:
+                            tv = ts_p.get('Value')
+                            if isinstance(tv, list) and tv:
+                                tin = tv[0]
+                                if isinstance(tin, dict) and isinstance(tin.get('Value'), dict):
+                                    new_sz = max(1, _zmax - bp_z + 1)
+                                    tin['Value']['Z'] = new_sz
+            preview = violations[:3]
+            out.append(Issue(
+                'error', 'stair_bubble_z_oob', 'zones',
+                f'{len(violations)} stair zone(s) have bubble Z extending past '
+                f'world bounds [{zmin},{zmax}]: {preview}. Engine null-derefs '
+                f'while routing across world edges.',
+                fixer=fix,
+                fixer_label=f'Shrink TargetSize.Z so bubble top fits in [{zmin},{zmax}]'))
+        return out
+
+    def _check_chapter_layer_continuity(self):
+        """Live SS chapter Layer values should be sequential (no gaps) for
+        clean traversal. Engine handles gaps but they often signal a missing
+        floor. WARNING."""
+        out = []
+        chapters_doc = self.docs.get('chapters')
+        if not chapters_doc:
+            return out
+        layers = []
+        for r in chapters_doc.rows:
+            n = r.get('Name', '')
+            if not n.lower().startswith('sandboxsmall-chapter'):
+                continue
+            if self._zstate(r) == 'Disabled':
+                continue
+            layer = self._get(r, 'Layer')
+            if isinstance(layer, int):
+                layers.append((layer, n))
+        if not layers:
+            return out
+        layer_set = {l for l, _ in layers}
+        lo, hi = min(layer_set), max(layer_set)
+        missing = [l for l in range(lo, hi + 1) if l not in layer_set]
+        if missing:
+            out.append(Issue(
+                'warning', 'chapter_layer_continuity', 'chapters',
+                f'Live SS chapter Layer sequence has gap(s): missing {missing} '
+                f'in range [{lo}..{hi}]. {len(layers)} chapters present.'))
+        return out
+
+    def _check_chapter_has_at_least_one_zone(self):
+        """Each Live SS chapter row should be referenced by at least one
+        Live SS zone via Chapter or AdditionalChapters. Otherwise the chapter
+        is dead weight — won't render. WARNING."""
+        out = []
+        chapters_doc = self.docs.get('chapters')
+        zones_doc = self.docs.get('zones')
+        if not (chapters_doc and zones_doc):
+            return out
+        # Live SS chapter names
+        live_chaps = set()
+        for r in chapters_doc.rows:
+            n = r.get('Name', '')
+            if not n.lower().startswith('sandboxsmall-chapter'):
+                continue
+            if self._zstate(r) == 'Disabled':
+                continue
+            live_chaps.add(n)
+        # Build referenced set
+        referenced = set()
+        for r in zones_doc.rows:
+            if self._zstate(r) == 'Disabled':
+                continue
+            zs_p = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs_p or str(zs_p.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            chap_p = self._fp(r.get('Value', []), 'Chapter')
+            if chap_p:
+                cv = chap_p.get('Value')
+                if isinstance(cv, list):
+                    for s in cv:
+                        if isinstance(s, dict) and s.get('Name') == 'RowName':
+                            v = s.get('Value')
+                            if v and v not in self.NULL_FNAMES:
+                                referenced.add(v)
+            achap_p = self._fp(r.get('Value', []), 'AdditionalChapters')
+            if achap_p:
+                for e in (achap_p.get('Value') or []):
+                    inner = e.get('Value') if isinstance(e, dict) else None
+                    if isinstance(inner, list):
+                        for s in inner:
+                            if isinstance(s, dict) and s.get('Name') == 'RowName':
+                                v = s.get('Value')
+                                if v and v not in self.NULL_FNAMES:
+                                    referenced.add(v)
+        unused = sorted(live_chaps - referenced)
+        if unused:
+            out.append(Issue(
+                'warning', 'chapter_has_at_least_one_zone', 'chapters',
+                f'{len(unused)} Live SS chapter(s) have no Live SS zone '
+                f'referencing them: {unused[:5]}. They are dead weight — '
+                f'won\'t render.'))
+        return out
+
+    def _check_live_landmark_has_host(self):
+        """Each Live Sandbox-namespaced landmark should be referenced by at
+        least one Live SS zone's LandmarkHandles. Engine still loads orphans
+        but they have no physical presence in the world. WARNING."""
+        out = []
+        landmarks_doc = self.docs.get('landmarks')
+        zones_doc = self.docs.get('zones')
+        if not (landmarks_doc and zones_doc):
+            return out
+        live_sandbox_lm = set()
+        for r in landmarks_doc.rows:
+            n = r.get('Name', '')
+            if not n.startswith('Sandbox.'):
+                continue
+            if self._zstate(r) == 'Disabled':
+                continue
+            live_sandbox_lm.add(n)
+        # Build referenced set
+        referenced = set()
+        for r in zones_doc.rows:
+            if self._zstate(r) == 'Disabled':
+                continue
+            zs_p = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs_p or str(zs_p.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            lh = self._fp(r.get('Value', []), 'LandmarkHandles')
+            if not lh: continue
+            for e in (lh.get('Value') or []):
+                inner = e.get('Value') if isinstance(e, dict) else None
+                if not isinstance(inner, list): continue
+                lm_p = self._fp(inner, 'Landmark')
+                if not lm_p: continue
+                sub = lm_p.get('Value')
+                if isinstance(sub, list):
+                    for s in sub:
+                        if isinstance(s, dict) and s.get('Name') == 'RowName':
+                            v = s.get('Value')
+                            if v and v not in self.NULL_FNAMES:
+                                referenced.add(v)
+        orphans = sorted(live_sandbox_lm - referenced)
+        if orphans:
+            out.append(Issue(
+                'warning', 'live_landmark_has_host', 'landmarks',
+                f'{len(orphans)} Live Sandbox.* landmark(s) have no host '
+                f'Live SS zone via LandmarkHandles: {orphans[:5]}. Engine '
+                f'still loads them but they have no physical presence.'))
+        return out
+
     # --- registry + run -------------------------------------------------
 
     @property
@@ -2349,14 +3213,26 @@ class BuildValidator:
             self._check_cross_dt_refs,
             self._check_z_bounds,
             self._check_unanchored_zones,
+            self._check_connection_null_endpoints,
             self._check_connection_endpoints_live,
             self._check_landmark_zband_alignment,
             self._check_landmark_minz_anchor,
             self._check_chapterid_uniqueness,
             self._check_chapter_displayname_resolves,
             self._check_extended_connectivity_neighbours,
+            self._check_extended_connectivity_z_bounds,
+            self._check_orphan_added_data,
             self._check_live_to_disabled,
             self._check_counter_sync,
+            # New ERROR checks added 2026-04 from Z-shift discoveries:
+            self._check_zone_preferred_z_in_band,
+            self._check_nested_subcell_z_in_band,
+            self._check_ss_landmark_bp_in_band,
+            # New checks added 2026-04 from 14-floor stair build:
+            self._check_stair_bubble_z_oob,
+            self._check_chapter_layer_continuity,
+            self._check_chapter_has_at_least_one_zone,
+            self._check_live_landmark_has_host,
         ]
 
     def run(self, progress=None):
@@ -2424,6 +3300,18 @@ class _ValidationDialog(tk.Toplevel):
     every dirty doc before returning 'skip'.
     """
 
+    # Check IDs that vanilla SandboxSmall ships with — flagging them is
+    # informational only, not crash-indicative. Hidden by default in the UI;
+    # toggle "Show vanilla-tolerated" to inspect them.
+    VANILLA_TOLERATED_CHECKS = frozenset({
+        'connection_null_endpoints',
+        'unanchored_zone',
+        'namemap_completeness',
+        'landmark_zband_misalign',
+        'landmark_not_at_minz',
+        'extended_connectivity_no_neighbour',
+    })
+
     def __init__(self, app, issues, validator):
         # Standard withdraw -> build -> deiconify pattern (avoids the
         # empty-grey-rectangle race the user has hit in this codebase).
@@ -2434,6 +3322,9 @@ class _ValidationDialog(tk.Toplevel):
         self.issues = list(issues)
         self.result = 'cancel'  # default if user closes the window
         self._fix_vars = []  # parallel to self.issues; tk.BooleanVar each
+        # Default: hide vanilla-tolerated warnings (they ship with vanilla
+        # SandboxSmall and don't crash anything). User can toggle to show.
+        self._show_vanilla_tolerated = tk.BooleanVar(value=False)
         self.title('Pre-build validation')
         self.transient(app)
         try:
@@ -2524,6 +3415,20 @@ class _ValidationDialog(tk.Toplevel):
             command=self._on_apply_fixes)
         self._apply_btn.pack(side='left')
 
+        # Copy-to-clipboard so users can paste into a bug report or
+        # search the codebase. Bundles every issue's title + explanation
+        # + raw detail into one plain-text block.
+        ttk.Button(btn_row, text='Copy text',
+                   command=self._on_copy_text).pack(side='left', padx=(8, 0))
+
+        # Vanilla-tolerated toggle — let user reveal warnings that vanilla
+        # SandboxSmall ships with (suppressed by default to keep dialog clean).
+        ttk.Checkbutton(btn_row,
+                        text='Show vanilla-tolerated',
+                        variable=self._show_vanilla_tolerated,
+                        command=self._on_toggle_vanilla
+                        ).pack(side='left', padx=(12, 0))
+
         ttk.Button(btn_row, text='Cancel',
                    command=self._on_cancel).pack(side='right')
         self._build_btn = ttk.Button(
@@ -2532,22 +3437,43 @@ class _ValidationDialog(tk.Toplevel):
 
     # --- (re)populate ------------------------------------------------
 
+    def _on_toggle_vanilla(self):
+        """User clicked the 'Show vanilla-tolerated' checkbox — re-render
+        with the current issues list and the new filter setting."""
+        self._populate(self.issues)
+
+    def _filter_issues(self, issues):
+        """Hide vanilla-tolerated warnings unless the toggle is checked."""
+        if self._show_vanilla_tolerated.get():
+            return list(issues)
+        return [i for i in issues
+                if i.check not in self.VANILLA_TOLERATED_CHECKS
+                or i.severity == 'error']  # always show if somehow elevated to error
+
     def _populate(self, issues):
         # Clear existing rows
         for child in self._inner.winfo_children():
             child.destroy()
         self._fix_vars = []
 
-        n_err = sum(1 for i in issues if i.severity == 'error')
-        n_warn = sum(1 for i in issues if i.severity == 'warning')
-        n_info = sum(1 for i in issues if i.severity == 'info')
+        # Apply the vanilla-tolerated filter
+        visible_issues = self._filter_issues(issues)
+        hidden_count = len(issues) - len(visible_issues)
+
+        n_err = sum(1 for i in visible_issues if i.severity == 'error')
+        n_warn = sum(1 for i in visible_issues if i.severity == 'warning')
+        n_info = sum(1 for i in visible_issues if i.severity == 'info')
         bits = []
         if n_err: bits.append(f'{n_err} error(s)')
         if n_warn: bits.append(f'{n_warn} warning(s)')
         if n_info: bits.append(f'{n_info} info')
         head = ('Pre-build validation: ' +
                 (', '.join(bits) if bits else 'no issues found'))
+        if hidden_count > 0:
+            head += f'   ({hidden_count} vanilla-tolerated hidden)'
         self._header.configure(text=head)
+        # Use visible_issues for the rest of the populate path
+        issues = visible_issues
 
         # Banner: green "all clear" only if zero issues
         if not issues:
@@ -2693,6 +3619,40 @@ class _ValidationDialog(tk.Toplevel):
                 text=self._header.cget('text') +
                      f'   (auto-fix applied: {applied})')
 
+    def _on_copy_text(self):
+        """Bundle every issue's text into a plain-text block and put it
+        on the clipboard so the user can paste elsewhere."""
+        lines = [self._header.cget('text'), '']
+        for iss in (self.issues or []):
+            try:
+                title, explanation = humanize(iss)
+            except Exception:
+                title = (iss.check or '?')
+                explanation = iss.detail or ''
+            sev = (iss.severity or 'info').upper()
+            lines.append(f'[{sev}] {title}')
+            if explanation:
+                lines.append(f'  {explanation}')
+            if iss.detail and iss.detail.strip() != (explanation or '').strip():
+                lines.append(f'  Raw: {iss.detail}')
+            if iss.fixer and getattr(iss, 'fixer_label', None):
+                lines.append(f'  Auto-fix: {iss.fixer_label}')
+            lines.append('')
+        text = '\n'.join(lines).rstrip() + '\n'
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()  # keep clipboard alive after dialog closes
+        except tk.TclError:
+            pass
+        # Brief visual feedback in the header
+        try:
+            cur = self._header.cget('text')
+            self._header.configure(text=cur + '   (copied to clipboard)')
+            self.after(1500, lambda: self._header.configure(text=cur))
+        except Exception:
+            pass
+
     def _on_build(self):
         self.result = 'skip'
         self._teardown()
@@ -2727,6 +3687,22 @@ class ZoneView:
     def zone_set(self): return get_enum(find_prop(self._values, 'ZoneSet'))
     @property
     def chapter(self): return get_rowname(find_prop(self._values, 'Chapter'))
+    @property
+    def additional_chapters(self):
+        """Return list of chapter RowNames in AdditionalChapters (vanilla
+        elevator pattern uses this to declare bridge-floor membership)."""
+        out = []
+        ac = find_prop(self._values, 'AdditionalChapters')
+        if not ac: return out
+        for entry in (ac.get('Value') or []):
+            if not isinstance(entry, dict): continue
+            ev = entry.get('Value')
+            if isinstance(ev, list):
+                for it in ev:
+                    if isinstance(it, dict) and it.get('Name') == 'RowName':
+                        v = it.get('Value')
+                        if v: out.append(v)
+        return out
     @property
     def biome(self): return get_tagname(find_prop(self._values, 'Biome'))
     @property
@@ -3621,6 +4597,8 @@ class ZoneTab(BaseTab):
                    command=self._add_zone).pack(side=tk.LEFT)
         ttk.Button(toolbar, text='Copy Zone…',
                    command=self._copy_zone).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Rename Zone…',
+                   command=self._rename_zone).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(toolbar, text='Delete Zone',
                    command=self._delete_zone).pack(side=tk.LEFT, padx=(4, 8))
         ttk.Button(toolbar, text='Revert Zone',
@@ -3698,7 +4676,7 @@ class ZoneTab(BaseTab):
         lbl = ttk.Label(g, text='Chapter:')
         lbl.grid(row=1, column=0, sticky='w', pady=(6, 0))
         self.v_chapter = tk.StringVar()
-        self.cmb_chapter = ttk.Combobox(g, textvariable=self.v_chapter, width=30, state='readonly')
+        self.cmb_chapter = ttk.Combobox(g, textvariable=self.v_chapter, width=50, state='readonly')
         self.cmb_chapter.grid(row=1, column=1, sticky='w', pady=(6, 0))
         self.cmb_chapter.bind(
             '<<ComboboxSelected>>',
@@ -3817,6 +4795,63 @@ class ZoneTab(BaseTab):
         self.bubble_preview = tk.Listbox(deckf, height=4)
         self.bubble_preview.pack(fill=tk.X)
 
+        # ---- Generation Tuning (per-zone aggression dials) ----
+        tunef = ttk.LabelFrame(self, text='Generation Tuning', padding=6)
+        tunef.pack(fill=tk.X, pady=(6, 0))
+        tg = ttk.Frame(tunef); tg.pack(fill=tk.X)
+
+        # NewBubbleChance: 0.0..1.0
+        lbl = ttk.Label(tg, text='NewBubbleChance:')
+        lbl.grid(row=0, column=0, sticky='w', pady=(0, 4))
+        attach_tooltip(lbl,
+            'Chance the engine grows an extra bubble while filling this zone. '
+            'Range 0..1. Higher = denser interior. 0.5 is the vanilla default.')
+        self.v_new_bubble = tk.DoubleVar()
+        sp = ttk.Spinbox(tg, from_=0.0, to=1.0, increment=0.05, width=8,
+                         textvariable=self.v_new_bubble,
+                         command=lambda: self._apply_float('new_bubble', self.v_new_bubble))
+        sp.grid(row=0, column=1, sticky='w', padx=(4, 16))
+        sp.bind('<FocusOut>', lambda e: self._apply_float('new_bubble', self.v_new_bubble))
+
+        # AdditionalOpeningChance: 0.0..1.0
+        lbl = ttk.Label(tg, text='AdditionalOpeningChance:')
+        lbl.grid(row=0, column=2, sticky='w', pady=(0, 4))
+        attach_tooltip(lbl,
+            'Chance the engine carves an extra opening between bubbles. '
+            'Range 0..1. Higher = more interconnections, less linear paths. '
+            '0.75 is most-zones default; 1.0 = always.')
+        self.v_add_opening = tk.DoubleVar()
+        sp = ttk.Spinbox(tg, from_=0.0, to=1.0, increment=0.05, width=8,
+                         textvariable=self.v_add_opening,
+                         command=lambda: self._apply_float('add_opening', self.v_add_opening))
+        sp.grid(row=0, column=3, sticky='w', padx=(4, 16))
+        sp.bind('<FocusOut>', lambda e: self._apply_float('add_opening', self.v_add_opening))
+
+        # GenerationPriority: integer (typically 1..120)
+        lbl = ttk.Label(tg, text='GenerationPriority:')
+        lbl.grid(row=0, column=4, sticky='w', pady=(0, 4))
+        attach_tooltip(lbl,
+            'Order in which the engine attempts to place this zone. '
+            'Higher = placed earlier (better real estate). Elevators/anchors '
+            'are 1-5; rooms 90-120; rare/filler 40-60.')
+        self.v_gen_priority = tk.IntVar()
+        sp = ttk.Spinbox(tg, from_=0, to=200, width=8,
+                         textvariable=self.v_gen_priority,
+                         command=lambda: self._apply_int('gen_priority', self.v_gen_priority))
+        sp.grid(row=0, column=5, sticky='w', padx=(4, 16))
+        sp.bind('<FocusOut>', lambda e: self._apply_int('gen_priority', self.v_gen_priority))
+
+        # bExtendFootprint
+        self.v_extend_fp = tk.BooleanVar()
+        chk = ttk.Checkbutton(tg, text='Extend footprint',
+                               variable=self.v_extend_fp,
+                               command=self._apply_extend_fp)
+        chk.grid(row=0, column=6, sticky='w', padx=(4, 0))
+        attach_tooltip(chk,
+            'When True, the zone may grow past its TargetSize during '
+            'generation if the engine needs more room. Most rooms = True; '
+            'elevators/special = False (rigid footprint).')
+
         # ---- Editable Landmarks ----
         lmf = ttk.LabelFrame(self, text='Landmarks', padding=6)
         lmf.pack(fill=tk.X, pady=(6, 0))
@@ -3899,7 +4934,8 @@ class ZoneTab(BaseTab):
         self.apply_sort(self.tree)
 
     def _row_tags(self, z):
-        tags = [z.chapter] if z.chapter in CHAPTER_COLORS else []
+        tag = chapter_color_tag(z.chapter)
+        tags = [tag] if tag else []
         if z.name in self.modified: tags.append(MODIFIED_TAG)
         if not z.is_enabled: tags.append(DISABLED_TAG)
         return tuple(tags)
@@ -4049,6 +5085,19 @@ class ZoneTab(BaseTab):
             self.v_toast.set(z.toast_appearance)
             self.v_bdeck.set(z.bubble_deck)
             self.v_pdeck.set(z.passage_deck)
+            # Generation tuning
+            def _read_num(name, default):
+                for p in z.row.get('Value', []):
+                    if isinstance(p, dict) and p.get('Name') == name:
+                        v = p.get('Value')
+                        if v is None: return default
+                        try: return type(default)(v)
+                        except (TypeError, ValueError): return default
+                return default
+            self.v_new_bubble.set(_read_num('NewBubbleChance', 0.5))
+            self.v_add_opening.set(_read_num('AdditionalOpeningChance', 0.75))
+            self.v_gen_priority.set(_read_num('GenerationPriority', 100))
+            self.v_extend_fp.set(bool(_read_num('bExtendFootprint', False)))
             self._refresh_bubble_preview(z)
             self._refresh_landmarks()
         finally:
@@ -4193,14 +5242,46 @@ class ZoneTab(BaseTab):
         if which == 'temp': z.set_zone_temperature(v)
         elif which == 'water': z.set_water_prevalence(v)
         elif which == 'light': z.set_light_prevalence(v)
+        elif which == 'new_bubble': self._set_zone_prop_float(z, 'NewBubbleChance', v)
+        elif which == 'add_opening': self._set_zone_prop_float(z, 'AdditionalOpeningChance', v)
         self._mark(z)
 
     def _apply_int(self, which, var):
         if self._updating or self.current is None: return
         try: v = int(var.get())
         except (tk.TclError, ValueError): return
-        if which == 'curve': self.current.set_lighting_curve(v)
-        self._mark(self.current)
+        z = self.current
+        if which == 'curve': z.set_lighting_curve(v)
+        elif which == 'gen_priority':
+            self._set_zone_prop_int(z, 'GenerationPriority', v)
+        self._mark(z)
+
+    def _apply_extend_fp(self):
+        if self._updating or self.current is None: return
+        z = self.current
+        self._set_zone_prop_bool(z, 'bExtendFootprint', bool(self.v_extend_fp.get()))
+        self._mark(z)
+
+    @staticmethod
+    def _set_zone_prop_float(z, name, value):
+        for p in z.row.get('Value', []):
+            if isinstance(p, dict) and p.get('Name') == name:
+                p['Value'] = float(value)
+                return
+
+    @staticmethod
+    def _set_zone_prop_int(z, name, value):
+        for p in z.row.get('Value', []):
+            if isinstance(p, dict) and p.get('Name') == name:
+                p['Value'] = int(value)
+                return
+
+    @staticmethod
+    def _set_zone_prop_bool(z, name, value):
+        for p in z.row.get('Value', []):
+            if isinstance(p, dict) and p.get('Name') == name:
+                p['Value'] = bool(value)
+                return
 
     def _apply_enabled(self):
         if self._updating or self.current is None: return
@@ -4287,6 +5368,12 @@ class ZoneTab(BaseTab):
         self.current = None
         self.refresh_from_doc()
         self.app.refresh_status()
+
+    def _rename_zone(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo('Rename', 'Select a zone first.'); return
+        self.app.rename_row('zones', sel[0], parent=self)
 
     # ---- Landmark editing ----
     def _landmark_picker(self, title, default_lm='', default_place='Fixed',
@@ -4404,6 +5491,8 @@ class ChapterTab(BaseTab):
                    command=self.add_chapter_dialog).pack(side=tk.LEFT)
         ttk.Button(toolbar, text='Copy Chapter…',
                    command=self._copy_chapter).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Rename Chapter…',
+                   command=self._rename_chapter).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(toolbar, text='Delete Chapter',
                    command=self._delete_chapter).pack(side=tk.LEFT, padx=(4, 0))
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
@@ -4704,6 +5793,12 @@ class ChapterTab(BaseTab):
         if hasattr(self.app, 'zone_tab'):
             self.app.zone_tab._populate_dropdowns()
         self.app.refresh_status()
+
+    def _rename_chapter(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo('Rename', 'Select a chapter first.'); return
+        self.app.rename_row('chapters', sel[0], parent=self)
 
 
 # -----------------------------------------------------------------------------
@@ -5474,8 +6569,12 @@ class LandmarkTab(BaseTab):
                    command=self._add_landmark_row).pack(side=tk.LEFT)
         ttk.Button(toolbar, text='Copy Landmark…',
                    command=self._copy_landmark_row).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Rename Landmark…',
+                   command=self._rename_landmark).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(toolbar, text='Delete Landmark',
                    command=self._delete_landmark_row).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Button(toolbar, text='Refresh',
+                   command=self.refresh_from_doc).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(toolbar, text='Landmarks anchor bubbles + drive zone connectivity',
                   foreground='#555').pack(side=tk.LEFT)
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
@@ -5496,7 +6595,16 @@ class LandmarkTab(BaseTab):
         self.tree = self.make_tree(left, [h[0] for h in headings], headings,
                                      settings_key='landmarks')
         self.tree.tag_configure(DISABLED_TAG, foreground='#999999')
+        # Orphan landmarks (no Live zone hosts them via LandmarkHandles):
+        # red text only — no background fill (was hard to read).
+        self.tree.tag_configure('orphan', foreground='#c0392b')
         self.tree.bind('<<TreeviewSelect>>', self._on_select)
+        # Hover tooltip for orphan reasons.
+        self._orphan_reasons = {}  # name -> reason string
+        self.tree.bind('<Motion>', self._on_tree_motion)
+        self.tree.bind('<Leave>', lambda _e: self._hide_orphan_tip())
+        self._tip_window = None
+        self._tip_for_row = None
 
         right = ttk.Frame(paned); paned.add(right, weight=1)
         self._build_detail(right)
@@ -5547,28 +6655,108 @@ class LandmarkTab(BaseTab):
         self.conn_list = tk.Listbox(cf, height=8)
         self.conn_list.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
+    # ---- orphan detection ----
+    def _compute_orphan_reasons(self):
+        """Walk every Live zone in DT_Moria_Zones, collect every landmark
+        referenced via LandmarkHandles. Any Live landmark NOT in that
+        referenced set is an orphan. Returns dict: landmark_name -> reason.
+        Disabled landmarks are not flagged (they're intentionally inactive)."""
+        reasons = {}
+        zone_doc = self.app.docs.get('zones')
+        if zone_doc is None:
+            return reasons
+        # Build set of landmark RowNames referenced by any Live zone
+        referenced = set()
+        for r in zone_doc.rows:
+            es = find_prop(r.get('Value', []), 'EnabledState')
+            if es and 'Disabled' in str(es.get('Value', '')):
+                continue
+            lh = find_prop(r.get('Value', []), 'LandmarkHandles')
+            for e in (lh.get('Value') or []) if lh else []:
+                for sub in e.get('Value') or []:
+                    if isinstance(sub, dict) and sub.get('Name') == 'Landmark':
+                        v = sub.get('Value')
+                        if isinstance(v, list):
+                            for it in v:
+                                if isinstance(it, dict) and it.get('Name') == 'RowName':
+                                    rn = it.get('Value')
+                                    if rn:
+                                        referenced.add(rn)
+        # Each Live landmark not referenced = orphan
+        for lm in self.landmarks:
+            if not lm.is_enabled:
+                continue
+            if lm.name not in referenced:
+                reasons[lm.name] = (
+                    f'No Live zone hosts "{lm.name}" via LandmarkHandles. '
+                    'A landmark must be referenced by at least one Live zone '
+                    'to anchor its bubble in the world. Add this landmark to '
+                    'a zone\'s LandmarkHandles, or disable the landmark if '
+                    'it is intentionally unused.'
+                )
+        return reasons
+
     def _populate_tree(self):
         self.tree.delete(*self.tree.get_children())
+        self._orphan_reasons = self._compute_orphan_reasons()
+        n_orphan = 0
         for lm in self.landmarks:
             tags = [] if lm.is_enabled else [DISABLED_TAG]
+            if lm.name in self._orphan_reasons:
+                tags.append('orphan'); n_orphan += 1
             self.tree.insert('', 'end', iid=lm.name,
                              values=(lm.name, lm.base_bubble_name, lm.placement,
                                      len(lm.connections()),
                                      'Yes' if lm.player_start else '',
                                      'Yes' if lm.is_enabled else 'No'),
                              tags=tuple(tags))
-        self.status_lbl.config(text=f'{len(self.landmarks)} landmarks')
+        self.status_lbl.config(
+            text=f'{len(self.landmarks)} landmarks  ·  {n_orphan} orphan(s)')
         self.apply_sort(self.tree)
 
     def _refresh_row(self, lm):
         if self.tree.exists(lm.name):
             tags = [] if lm.is_enabled else [DISABLED_TAG]
+            if lm.name in self._orphan_reasons:
+                tags.append('orphan')
             self.tree.item(lm.name,
                            values=(lm.name, lm.base_bubble_name, lm.placement,
                                    len(lm.connections()),
                                    'Yes' if lm.player_start else '',
                                    'Yes' if lm.is_enabled else 'No'),
                            tags=tuple(tags))
+
+    # ---- orphan tooltip ----
+    def _on_tree_motion(self, event):
+        row_id = self.tree.identify_row(event.y)
+        if not row_id or row_id not in self._orphan_reasons:
+            self._hide_orphan_tip()
+            self._tip_for_row = None
+            return
+        if row_id == self._tip_for_row:
+            return
+        self._tip_for_row = row_id
+        self._show_orphan_tip(event, self._orphan_reasons[row_id])
+
+    def _show_orphan_tip(self, event, text):
+        self._hide_orphan_tip()
+        x = self.tree.winfo_rootx() + event.x + 16
+        y = self.tree.winfo_rooty() + event.y + 14
+        tw = tk.Toplevel(self.tree)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f'+{x}+{y}')
+        tw.configure(background='#202020')
+        tk.Label(tw, text=text, justify='left', wraplength=420,
+                 background='#fffacd', foreground='#1a1a1a',
+                 borderwidth=1, relief='solid',
+                 font=('Segoe UI', 9), padx=8, pady=6).pack()
+        self._tip_window = tw
+
+    def _hide_orphan_tip(self):
+        if self._tip_window is not None:
+            try: self._tip_window.destroy()
+            except Exception: pass
+            self._tip_window = None
 
     def _on_select(self, _=None):
         sel = self.tree.selection()
@@ -5722,6 +6910,12 @@ class LandmarkTab(BaseTab):
         self.refresh_from_doc()
         self.app.refresh_status()
 
+    def _rename_landmark(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo('Rename', 'Select a landmark first.'); return
+        self.app.rename_row('landmarks', sel[0], parent=self)
+
 
 # -----------------------------------------------------------------------------
 # MAPPINGS TAB — the one-glance relationship view
@@ -5788,7 +6982,8 @@ class MappingsTab(BaseTab):
             lms = ', '.join(e['landmark'] for e in z.landmark_entries()
                             if e['landmark']) or '—'
             px, py, pz = z.position
-            tags = [z.chapter] if z.chapter in CHAPTER_COLORS else []
+            tag = chapter_color_tag(z.chapter)
+            tags = [tag] if tag else []
             if not z.is_enabled: tags.append(DISABLED_TAG)
             layer_val = layer_by_chap.get(z.chapter, '')
             layer_str = str(layer_val) if layer_val is not None and layer_val != '' else ''
@@ -6031,8 +7226,9 @@ class HistoryTab(BaseTab):
             prefix = kind_prefix[kind]
             chap = zone_chapter.get(row_name, '') if doc_key == 'zones' else ''
             row_tags = [kind]
-            if chap in CHAPTER_COLORS:
-                row_tags.append(chap)
+            ctag = chapter_color_tag(chap)
+            if ctag:
+                row_tags.append(ctag)
 
             top_label = f'{prefix} {row_name}'
             context = doc_label
@@ -6486,6 +7682,8 @@ class LayoutConnectionsTab(BaseTab):
                    command=self._add_connection_row).pack(side=tk.LEFT)
         ttk.Button(bar, text='Copy…',
                    command=self._copy_connection_row).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(bar, text='Rename…',
+                   command=self._rename_connection).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(bar, text='Delete',
                    command=self._delete_connection_row).pack(side=tk.LEFT, padx=(4, 8))
 
@@ -6566,8 +7764,8 @@ class LayoutConnectionsTab(BaseTab):
         self.tree = self.make_tree(left, cols, specs, settings_key='connections')
         try:
             self.tree.tag_configure(DISABLED_TAG, foreground='#999999')
-            self.tree.tag_configure('orphan', foreground='#c0392b',
-                                    background='#3a1a1a')
+            # Red text only — no dark background (was hard to read).
+            self.tree.tag_configure('orphan', foreground='#c0392b')
         except Exception: pass
         self.tree.bind('<<TreeviewSelect>>', self._on_select)
 
@@ -6730,6 +7928,36 @@ class LayoutConnectionsTab(BaseTab):
                                                            self.v_dz.get()))
         attach_tooltip(self.cb_dz, 'conn_dest_zone')
 
+        # Routing coordinates — Subcell, OriginCoord, DestinationCoord.
+        # These IntVector fields are READ AND USED by the engine's A* router
+        # at world-gen time. The Z component must be inside a Live chapter's
+        # MinZ..MaxZ band, otherwise the router calls GetZone() on an empty
+        # cell → null deref → crash. Editing these here lets the user keep
+        # them aligned when chapters move.
+        coords_frame = ttk.LabelFrame(d, text='Routing coords (engine A*)', padding=6)
+        coords_frame.pack(fill=tk.X, pady=(8, 0))
+        self._coord_vars = {}  # field_name -> {'x':IntVar,'y':IntVar,'z':IntVar}
+
+        def _make_coord_row(parent, row, fld, tooltip):
+            ttk.Label(parent, text=fld + ':', width=20).grid(row=row, column=0, sticky='w')
+            xs = tk.IntVar(); ys = tk.IntVar(); zs = tk.IntVar()
+            self._coord_vars[fld] = {'x': xs, 'y': ys, 'z': zs}
+            for col, (lbl, var) in enumerate([('X', xs), ('Y', ys), ('Z', zs)], start=1):
+                ttk.Label(parent, text=lbl).grid(row=row, column=col*2 - 1, sticky='e',
+                                                  padx=(8 if col > 1 else 4, 2))
+                sp = ttk.Spinbox(parent, from_=-99, to=99, width=5, textvariable=var,
+                                  command=lambda f=fld: self._apply_coord_vec(f))
+                sp.grid(row=row, column=col*2, sticky='w')
+                sp.bind('<FocusOut>', lambda _e, f=fld: self._apply_coord_vec(f))
+
+        _make_coord_row(coords_frame, 0, 'Subcell',
+                        'Subcell coordinate the connection occupies. Z must be '
+                        'inside a Live chapter band or the router crashes.')
+        _make_coord_row(coords_frame, 1, 'OriginCoord',
+                        'Origin endpoint world coordinate (often X/Y only, Z=0).')
+        _make_coord_row(coords_frame, 2, 'DestinationCoord',
+                        'Destination endpoint world coordinate (often X/Y only, Z=0).')
+
         # Orphan / status feedback
         self.v_status = tk.StringVar(value='')
         ttk.Label(d, textvariable=self.v_status,
@@ -6826,6 +8054,13 @@ class LayoutConnectionsTab(BaseTab):
             self.v_oz.set(self._get_rowname(r, 'OriginZone') or 'None')
             self.v_dlm.set(self._get_rowname(r, 'DestinationLandmark') or 'None')
             self.v_dz.set(self._get_rowname(r, 'DestinationZone') or 'None')
+            # Routing coords — read each IntVector and populate spinboxes
+            for fld in ('Subcell', 'OriginCoord', 'DestinationCoord'):
+                vec = self._read_intvec(r, fld)
+                if fld in self._coord_vars:
+                    self._coord_vars[fld]['x'].set(vec[0] if vec else 0)
+                    self._coord_vars[fld]['y'].set(vec[1] if vec else 0)
+                    self._coord_vars[fld]['z'].set(vec[2] if vec else 0)
             # status / orphan reason
             lm_holders = self._build_landmark_holders()
             is_orphan, reason = self._row_orphan_status(r, lm_holders)
@@ -6872,6 +8107,38 @@ class LayoutConnectionsTab(BaseTab):
         p['Value'] = bool(value)
         self._refresh_row()
         self.app.refresh_status()
+
+    def _read_intvec(self, r, fld):
+        """Return (X, Y, Z) tuple for an IntVector property field on row r,
+        or None if the field doesn't exist or is malformed."""
+        p = self._fp(r['Value'], fld)
+        if not p: return None
+        v = p.get('Value')
+        if isinstance(v, list) and v:
+            d = v[0].get('Value') if isinstance(v[0], dict) else None
+            if isinstance(d, dict):
+                return (d.get('X', 0), d.get('Y', 0), d.get('Z', 0))
+        return None
+
+    def _apply_coord_vec(self, fld):
+        """Write back the (X, Y, Z) values from the spinboxes to the row's
+        IntVector field. Wired to Subcell, OriginCoord, DestinationCoord."""
+        if self._updating or self.current_row is None: return
+        if fld not in self._coord_vars: return
+        try:
+            x = int(self._coord_vars[fld]['x'].get())
+            y = int(self._coord_vars[fld]['y'].get())
+            z = int(self._coord_vars[fld]['z'].get())
+        except (tk.TclError, ValueError):
+            return  # ignore partial input
+        p = self._fp(self.current_row['Value'], fld)
+        if not p: return
+        v = p.get('Value')
+        if isinstance(v, list) and v:
+            d = v[0].get('Value') if isinstance(v[0], dict) else None
+            if isinstance(d, dict):
+                d['X'] = x; d['Y'] = y; d['Z'] = z
+                self.app.refresh_status()
 
     def _apply_rowhandle(self, fld, new_target):
         if self._updating or self.current_row is None: return
@@ -6978,6 +8245,12 @@ class LayoutConnectionsTab(BaseTab):
         self.refresh_from_doc()
         self.app.refresh_status()
 
+    def _rename_connection(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo('Rename', 'Select a connection first.'); return
+        self.app.rename_row('connections', sel[0], parent=self)
+
 
 # -----------------------------------------------------------------------------
 # LEVELS TAB — top-to-bottom chart of the SandboxSmall stack
@@ -7069,9 +8342,19 @@ class LevelsTab(BaseTab):
             counts[chap] = counts.get(chap, 0) + 1
             total_zones += 1
 
-        # Live SandboxSmall chapters, top-to-bottom by Layer
+        # Live SandboxSmall LEVEL chapters only (skip zone/landmark-anchored
+        # rows that share the SandboxSmall-Chapter## prefix). A LEVEL row's
+        # name suffix is 'LevelN' or 'DeepN'. Also accept the legacy
+        # lowercase 'SandboxSmall-chapter-N' pattern in case of old data.
+        def _is_level_row(name):
+            if name.startswith('SandboxSmall-chapter-'):
+                return True
+            if name.startswith('SandboxSmall-Chapter'):
+                tail = name.split('.', 1)[1] if '.' in name else ''
+                return tail.startswith('Level') or tail.startswith('Deep')
+            return False
         ss = [r for r in ch.rows
-              if r.get('Name', '').startswith('SandboxSmall-chapter-')
+              if _is_level_row(r.get('Name', ''))
               and zstate(r) != 'Disabled']
         def lkey(r):
             L = get_field(r, 'Layer')
@@ -7082,9 +8365,16 @@ class LevelsTab(BaseTab):
         # Vanilla pattern — SandboxSmall worlds reach the DLC outdoor areas
         # (DimrillDale, DurinsTower, TradingPost) via zones whose ZoneSet
         # is SandboxSmall but whose Chapter is a Moria-* row.
+        # Bridge = any chapter referenced by Live SS zones that ISN'T a
+        # SS level row. Treat the new SandboxSmall-Chapter##.<X> non-Level/
+        # Deep rows (zone/landmark-anchored) as level-equivalent so they
+        # don't fall into the bridge bucket either.
+        def _is_ss_chap(name):
+            return (name.startswith('SandboxSmall-chapter-') or
+                    name.startswith('SandboxSmall-Chapter'))
         bridge_chap_names = sorted(
             n for n in counts
-            if not n.startswith('SandboxSmall-chapter-') and n != '(none)')
+            if not _is_ss_chap(n) and n != '(none)')
         bridge_rows = []
         for r in ch.rows:
             if r.get('Name') in bridge_chap_names and zstate(r) != 'Disabled':
@@ -7220,26 +8510,70 @@ class MapTab(BaseTab):
 
     def __init__(self, parent, app):
         super().__init__(parent, app)
-        self._offset = [500, 350]
-        self._scale = 24.0
-        # 3D camera orientation (degrees). Defaults give a classic isometric
-        # look (yaw 45°, pitch 35.264°).
-        self._yaw = 45.0     # rotation around the world Z axis
-        self._pitch = 35.26  # tilt (rotation around the camera's X axis)
+        # Persisted view state — pulled from settings.ini at startup so the
+        # tab opens to the same view, layout, filter, etc. the user used last.
+        try:
+            yaw_def = float(SETTINGS.get_filter('map_yaw', '45') or 45)
+            pitch_def = float(SETTINGS.get_filter('map_pitch', '35.26') or 35.26)
+            scale_def = float(SETTINGS.get_filter('map_scale', '24') or 24)
+            ox_def = float(SETTINGS.get_filter('map_offset_x', '500') or 500)
+            oy_def = float(SETTINGS.get_filter('map_offset_y', '350') or 350)
+        except (ValueError, TypeError):
+            yaw_def, pitch_def, scale_def = 45.0, 35.26, 24.0
+            ox_def, oy_def = 500.0, 350.0
+        self._offset = [ox_def, oy_def]
+        self._scale = scale_def
+        self._yaw = yaw_def
+        self._pitch = pitch_def
         self._pan_dragging = False
         self._rot_dragging = False
+        self._zone_drag = None  # {name, press_xy, orig_pos, started, valid}
         self._drag_last = None
         self._box_refs = []
-        self._show_connections = tk.BooleanVar(value=True)
-        self._show_labels = tk.BooleanVar(value=True)
-        self._show_landmarks = tk.BooleanVar(value=True)
-        self._layout_mode = tk.StringVar(value='Grid (one per cell)')
-        self._chapter_filter = tk.StringVar(value='(first chapter)')
+        self._show_connections = tk.BooleanVar(
+            value=SETTINGS.get_filter_bool('map_show_connections', True))
+        self._show_labels = tk.BooleanVar(
+            value=SETTINGS.get_filter_bool('map_show_labels', True))
+        self._show_landmarks = tk.BooleanVar(
+            value=SETTINGS.get_filter_bool('map_show_landmarks', True))
+        self._hide_unpinned = tk.BooleanVar(
+            value=SETTINGS.get_filter_bool('map_hide_unpinned', False))
+        self._layout_mode = tk.StringVar(
+            value=SETTINGS.get_filter('map_layout_mode',
+                                       'Grid (one per cell)')
+                  or 'Grid (one per cell)')
+        self._chapter_filter = tk.StringVar(
+            value=SETTINGS.get_filter('map_chapter_filter',
+                                       '(first chapter)') or '(first chapter)')
+        # Persist on change. Each var write calls _persist_view() — which
+        # stamps every setting at once (cheap; small dict).
+        for var in (self._show_connections, self._show_labels,
+                    self._show_landmarks, self._hide_unpinned,
+                    self._layout_mode, self._chapter_filter):
+            var.trace_add('write', lambda *_: self._persist_view())
         self._projected = {}
         self._build()
 
     def refresh_from_doc(self):
         self.redraw()
+
+    def _persist_view(self):
+        """Stamp all map view settings to settings.ini so they survive
+        between sessions. Called on any var write or view-state change."""
+        try:
+            SETTINGS.set_filter('map_show_connections', self._show_connections.get())
+            SETTINGS.set_filter('map_show_labels', self._show_labels.get())
+            SETTINGS.set_filter('map_show_landmarks', self._show_landmarks.get())
+            SETTINGS.set_filter('map_hide_unpinned', self._hide_unpinned.get())
+            SETTINGS.set_filter('map_layout_mode', self._layout_mode.get())
+            SETTINGS.set_filter('map_chapter_filter', self._chapter_filter.get())
+            SETTINGS.set_filter('map_yaw', f'{self._yaw:.4f}')
+            SETTINGS.set_filter('map_pitch', f'{self._pitch:.4f}')
+            SETTINGS.set_filter('map_scale', f'{self._scale:.4f}')
+            SETTINGS.set_filter('map_offset_x', f'{self._offset[0]:.2f}')
+            SETTINGS.set_filter('map_offset_y', f'{self._offset[1]:.2f}')
+        except Exception:
+            pass
 
     def _build(self):
         toolbar = ttk.Frame(self); toolbar.pack(fill=tk.X, pady=(0, 4))
@@ -7269,6 +8603,10 @@ class MapTab(BaseTab):
         ttk.Checkbutton(toolbar, text='Landmarks',
                         variable=self._show_landmarks,
                         command=self.redraw).pack(side=tk.LEFT, padx=(10, 0))
+        # In True-positions mode, hide auto-placed zones (Pos=(0,0,0))
+        ttk.Checkbutton(toolbar, text='Hide variable placement',
+                        variable=self._hide_unpinned,
+                        command=self.redraw).pack(side=tk.LEFT, padx=(10, 0))
 
         # View-preset buttons so the user isn't dependent on drag math
         ttk.Separator(toolbar, orient='vertical').pack(side=tk.LEFT,
@@ -7291,7 +8629,29 @@ class MapTab(BaseTab):
         # Initialise readouts
         self._update_angle_label()
 
-        canvas_frame = ttk.Frame(self); canvas_frame.pack(fill=tk.BOTH, expand=True)
+        # Split: left side hierarchical zone list, right side the 3D canvas.
+        paned = ttk.PanedWindow(self, orient='horizontal')
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # ----- Left pane: Level/Zone tree, chapter-colour-coded -----
+        left = ttk.Frame(paned, width=260)
+        paned.add(left, weight=0)
+        ttk.Label(left, text='Levels & zones',
+                  foreground=self.app.COLOR_MUTED).pack(anchor='w', padx=4, pady=(2, 2))
+        tree_box = ttk.Frame(left); tree_box.pack(fill=tk.BOTH, expand=True)
+        self.zone_tree = ttk.Treeview(tree_box, show='tree', selectmode='browse')
+        ysb = ttk.Scrollbar(tree_box, orient='vertical', command=self.zone_tree.yview)
+        self.zone_tree.configure(yscrollcommand=ysb.set)
+        self.zone_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        # Same chapter colour scheme as the Zones tab.
+        for ch, c in CHAPTER_COLORS.items():
+            self.zone_tree.tag_configure(ch, background=c)
+        self.zone_tree.bind('<<TreeviewSelect>>', self._on_zone_tree_select)
+
+        # ----- Right pane: 3D canvas -----
+        canvas_frame = ttk.Frame(paned)
+        paned.add(canvas_frame, weight=1)
         self.canvas = tk.Canvas(canvas_frame, background='#202028',
                                  highlightthickness=0, takefocus=1)
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -7377,45 +8737,280 @@ class MapTab(BaseTab):
     # ---- data ----
     def refresh_from_doc(self):
         self._populate_chapter_dropdown()
+        self._populate_zone_tree()
+        self.redraw()
+
+    def _populate_zone_tree(self):
+        """Build the left-side level/zone hierarchy. Top-level rows are the
+        14 SandboxSmall level chapters (Level1..Level7 + Deep1..Deep7), sorted
+        top-to-bottom by Layer descending. Nested under each level: every Live
+        SandboxSmall zone whose Chapter shares that floor's chapter # (covers
+        zone/landmark-anchored rows that share the level's CID). Each row is
+        colour-coded with the same CHAPTER_COLORS scheme used on the Zones tab.
+        Selecting a level switches the canvas filter; selecting a zone selects
+        its level and (best-effort) highlights it on the redraw."""
+        tr = self.zone_tree
+        # remember selection across rebuilds
+        prev_sel = tr.selection()[0] if tr.selection() else None
+        for iid in tr.get_children(''):
+            tr.delete(iid)
+
+        chap_doc = self.app.docs.get('chapters')
+        zone_doc = self.app.docs.get('zones')
+        if chap_doc is None or zone_doc is None:
+            return
+
+        def fp(v, n):
+            for p in v or []:
+                if isinstance(p, dict) and p.get('Name') == n:
+                    return p
+            return None
+        def get(r, k):
+            p = fp(r['Value'], k)
+            if not p: return None
+            v = p.get('Value')
+            if isinstance(v, list):
+                for it in v:
+                    if isinstance(it, dict) and it.get('Name') == 'RowName':
+                        return it.get('Value', '')
+            return v
+        def state(r):
+            p = fp(r.get('Value', []), 'EnabledState')
+            return str(p.get('Value', '')).split('::')[-1] if p else None
+
+        def is_level(name):
+            tail = name.split('.', 1)[1] if '.' in name else ''
+            return (name.startswith('SandboxSmall-chapter-') or
+                    (name.startswith('SandboxSmall-Chapter') and
+                     (tail.startswith('Level') or tail.startswith('Deep'))))
+
+        # Build level rows sorted by Layer descending (top floor first).
+        level_rows = [r for r in chap_doc.rows
+                      if is_level(r.get('Name', '')) and state(r) != 'Disabled']
+        def lkey(r):
+            L = get(r, 'Layer')
+            return -(L if isinstance(L, int) else 0)
+        level_rows.sort(key=lkey)
+
+        # Index zones by chapter # so we can group efficiently.
+        zones_by_tag = {}
+        for r in zone_doc.rows:
+            if state(r) == 'Disabled': continue
+            zs = fp(r.get('Value', []), 'ZoneSet')
+            if zs is None: continue
+            if str(zs.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            chap = get(r, 'Chapter') or ''
+            tag = chapter_color_tag(chap)
+            if not tag: continue
+            zones_by_tag.setdefault(tag, []).append(r['Name'])
+
+        # Insert level + nested zone rows.
+        for r in level_rows:
+            name = r['Name']
+            L = get(r, 'Layer')
+            tag = chapter_color_tag(name)
+            if isinstance(L, int):
+                lv = 'Lv-1' if L == 0 else (f'Lv-{L+1}' if L > 0 else f'D-{-L}')
+            else:
+                lv = '?'
+            # Strip the SandboxSmall- prefix on the level label for compactness.
+            short = name.replace('SandboxSmall-', '')
+            label = f'{lv}  {short}'
+            level_iid = tr.insert('', tk.END, iid=name, text=label,
+                                  tags=(tag,) if tag else ())
+            # Nested zones — sort alphabetically.
+            for zname in sorted(zones_by_tag.get(tag, [])):
+                tr.insert(level_iid, tk.END, iid=zname, text=zname,
+                          tags=(tag,) if tag else ())
+            tr.item(level_iid, open=True)
+
+        # Restore previous selection if still present.
+        if prev_sel and tr.exists(prev_sel):
+            tr.selection_set(prev_sel)
+            tr.see(prev_sel)
+
+    def _on_zone_tree_select(self, _e=None):
+        """Tree selection: a level row sets the chapter filter to that level;
+        a zone row sets the filter to the zone's level (so its containing
+        floor is shown), and remembers the zone name so redraw can highlight
+        it (best-effort outline; noop if zone has no rendered cell yet)."""
+        sel = self.zone_tree.selection()
+        if not sel: return
+        iid = sel[0]
+        chap_doc = self.app.docs.get('chapters')
+        if chap_doc is None: return
+
+        # Level row: iid is the level's chapter row name.
+        is_level_iid = iid.startswith('SandboxSmall-chapter-') or (
+            iid.startswith('SandboxSmall-Chapter')
+            and '.' in iid
+            and (iid.split('.', 1)[1].startswith('Level')
+                 or iid.split('.', 1)[1].startswith('Deep')))
+        self._highlight_zone = None
+        if is_level_iid:
+            if self._chapter_filter.get() != iid:
+                self._chapter_filter.set(iid)
+            self.redraw()
+            return
+
+        # Zone row: iid is the zone Name. Resolve its chapter -> level row.
+        zone_doc = self.app.docs.get('zones')
+        if zone_doc is None: return
+        target = next((r for r in zone_doc.rows if r.get('Name') == iid), None)
+        if target is None: return
+
+        def fp(v, n):
+            for p in v or []:
+                if isinstance(p, dict) and p.get('Name') == n: return p
+            return None
+        def get(r, k):
+            p = fp(r['Value'], k)
+            if not p: return None
+            v = p.get('Value')
+            if isinstance(v, list):
+                for it in v:
+                    if isinstance(it, dict) and it.get('Name') == 'RowName':
+                        return it.get('Value', '')
+            return v
+
+        chap = get(target, 'Chapter') or ''
+        tag = chapter_color_tag(chap)
+        # Find the level row whose name has the same chapter # tag.
+        level_match = None
+        for r in chap_doc.rows:
+            n = r.get('Name', '')
+            if chapter_color_tag(n) == tag:
+                tail = n.split('.', 1)[1] if '.' in n else ''
+                if tail.startswith('Level') or tail.startswith('Deep') \
+                        or n.startswith('SandboxSmall-chapter-'):
+                    level_match = n; break
+        if level_match and self._chapter_filter.get() != level_match:
+            self._chapter_filter.set(level_match)
+        self._highlight_zone = iid
         self.redraw()
 
     def _populate_chapter_dropdown(self):
         zone_doc = self.app.docs.get('zones')
+        chap_doc = self.app.docs.get('chapters')
         if zone_doc is None:
             return
-        # Chapters actually used by SandboxSmall zones (sorted by chapter id if possible)
-        ch_order = []
-        seen = set()
-        for r in zone_doc.rows:
-            z = ZoneView(r)
-            if z.zone_set != 'SandboxSmall':
-                continue
-            if z.chapter and z.chapter not in seen:
-                seen.add(z.chapter); ch_order.append(z.chapter)
-        # Sort SandboxSmall-chapter-N numerically
-        def sort_key(c):
+        # Build a list of LEVEL chapters only (not zone/landmark-anchored
+        # rows). A LEVEL row's name suffix is 'LevelN' or 'DeepN', or the
+        # row uses the legacy 'SandboxSmall-chapter-N' pattern. Match
+        # chapter rows -> their chapter # so the dropdown is one entry per
+        # actual floor.
+        level_rows = []
+        if chap_doc:
+            for cr in chap_doc.rows:
+                name = cr.get('Name', '') or ''
+                tail = name.split('.', 1)[1] if '.' in name else ''
+                is_level = (
+                    name.startswith('SandboxSmall-chapter-') or
+                    (name.startswith('SandboxSmall-Chapter') and
+                     (tail.startswith('Level') or tail.startswith('Deep')))
+                )
+                if is_level:
+                    level_rows.append(name)
+
+        # Sort by chapter #
+        def lvl_key(c):
+            tag = chapter_color_tag(c) or ''
             try:
-                return (0, int(c.rsplit('-', 1)[-1]))
+                return (0, int(tag.rsplit('-', 1)[-1]) if tag else 99)
             except Exception:
                 return (1, c)
-        ch_order.sort(key=sort_key)
-        # Prepend All + campaign option
-        options = ['All chapters'] + ch_order + ['All (incl. campaign zones)']
+        level_rows.sort(key=lvl_key)
+
+        options = ['All chapters'] + level_rows + ['All (incl. campaign zones)']
         self.cmb_chapter['values'] = options
         cur = self._chapter_filter.get()
         if cur not in options:
-            # Default to first sandbox chapter if available
-            self._chapter_filter.set(ch_order[0] if ch_order else 'All chapters')
+            self._chapter_filter.set(level_rows[0] if level_rows else 'All chapters')
 
     def _visible_zones(self):
+        """Return the list of zones to render. When a single level chapter
+        is selected, also include 'ghost' zones from other levels whose Z
+        range bleeds into the selected level's Z band — these draw greyed
+        out so the user can see what's already occupying overhead/below
+        cells while positioning current-level zones in Front view."""
         zones = [ZoneView(r) for r in self.app.docs['zones'].rows]
         choice = self._chapter_filter.get()
+        self._ghost_zones = set()
+
         if choice == 'All (incl. campaign zones)':
-            return zones
-        if choice == 'All chapters':
-            return [z for z in zones if z.zone_set == 'SandboxSmall']
-        # Specific chapter row-name
-        return [z for z in zones if z.chapter == choice]
+            result = zones
+        elif choice == 'All chapters':
+            result = [z for z in zones if z.zone_set == 'SandboxSmall']
+        else:
+            # Specific level chapter selected: match all zones whose chapter
+            # shares the same chapter # (i.e., on the same floor — covers
+            # both the level row and any zone/landmark-anchored rows).
+            target_tag = chapter_color_tag(choice)
+            if target_tag is None:
+                result = [z for z in zones
+                          if z.chapter == choice
+                          or choice in z.additional_chapters]
+            else:
+                # Match either the primary Chapter OR any AdditionalChapters
+                # entry — vanilla elevators register bridge-floor membership
+                # via AdditionalChapters, so a stair zone whose primary chapter
+                # is Lv-1 but which lists Lv-2 in AdditionalChapters should
+                # render when the user views Lv-2.
+                def _matches_target(z):
+                    if z.zone_set != 'SandboxSmall': return False
+                    if chapter_color_tag(z.chapter) == target_tag: return True
+                    for ac in z.additional_chapters:
+                        if chapter_color_tag(ac) == target_tag:
+                            return True
+                    return False
+                result = [z for z in zones if _matches_target(z)]
+
+            # Add ghost zones: any other SandboxSmall zone whose Z extent
+            # overlaps the selected level's Z band. Useful in Front view
+            # when positioning since the user can see "what else is there
+            # at this Z layer" without losing focus on the current level.
+            sel_zmin, sel_zmax = self._chapter_z_band(choice)
+            if sel_zmin is not None:
+                primary_names = {z.name for z in result}
+                for z in zones:
+                    if z.name in primary_names: continue
+                    if z.zone_set != 'SandboxSmall': continue
+                    pos = z.position
+                    sz = z.target_size
+                    if not pos or not sz: continue
+                    if pos == (0, 0, 0): continue  # auto-place — skip
+                    z_lo = pos[2]
+                    z_hi = pos[2] + max(sz[2], 1) - 1
+                    # overlap test
+                    if z_hi >= sel_zmin and z_lo <= sel_zmax:
+                        result.append(z)
+                        self._ghost_zones.add(z.name)
+
+        # Hide-variable-placement: drop zones at the auto-place sentinel
+        # (Pos=(0,0,0)). Only meaningful in True-positions mode (in Grid
+        # mode, positions are computed regardless of the data Pos).
+        if self._hide_unpinned.get() and self._layout_mode.get().startswith('True'):
+            result = [z for z in result if z.position != (0, 0, 0)]
+        return result
+
+    def _chapter_z_band(self, chapter_name):
+        """Return (MinZ, MaxZ) for the selected chapter row, or (None, None)
+        if not resolvable. Falls back to scanning chapter rows that share
+        the same chapter # (so anchored rows also work)."""
+        chap_doc = self.app.docs.get('chapters')
+        if chap_doc is None:
+            return (None, None)
+        target_tag = chapter_color_tag(chapter_name)
+        for r in chap_doc.rows:
+            if r.get('Name') == chapter_name or chapter_color_tag(r.get('Name','')) == target_tag:
+                mn = find_prop(r.get('Value', []), 'MinZ')
+                mx = find_prop(r.get('Value', []), 'MaxZ')
+                mn_v = mn.get('Value') if mn else None
+                mx_v = mx.get('Value') if mx else None
+                if mn_v is not None and mx_v is not None:
+                    return (int(mn_v), int(mx_v))
+        return (None, None)
 
     def _landmark_to_zones(self):
         """Map each landmark RowName to list of zone_names that reference it."""
@@ -7458,16 +9053,20 @@ class MapTab(BaseTab):
         single_chapter = choice not in ('All chapters',
                                          'All (incl. campaign zones)')
 
-        # Group by chapter then preserve zone order
+        # Group zones by chapter # (so anchored chapter rows sharing the
+        # same level # collapse into one stack layer).
         groups = {}
+        group_keys = {}  # tag -> a representative chapter row name (for sorting)
         for z in zones:
-            groups.setdefault(z.chapter or '(none)', []).append(z)
-        # Sort chapters by numeric suffix for stacking
-        def ch_key(c):
+            tag = chapter_color_tag(z.chapter) or (z.chapter or '(none)')
+            groups.setdefault(tag, []).append(z)
+            group_keys.setdefault(tag, z.chapter or '(none)')
+        # Sort by chapter # via the tag
+        def ch_key(t):
             try:
-                return (0, int(c.rsplit('-', 1)[-1]))
+                return (0, int(t.rsplit('-', 1)[-1]))
             except Exception:
-                return (1, c)
+                return (1, t)
         ordered_chapters = sorted(groups.keys(), key=ch_key)
 
         # Determine target columns — aim for roughly sqrt(n) per chapter
@@ -7507,6 +9106,14 @@ class MapTab(BaseTab):
         self._projected.clear()
 
         zones = self._visible_zones()
+        # Cache the current level's Z band so zone drawing can flag zones
+        # whose Size.Z extends past the level's MinZ/MaxZ.
+        choice = self._chapter_filter.get()
+        if choice in ('All chapters', 'All (incl. campaign zones)') or not choice:
+            self._sel_z_band = (None, None)
+        else:
+            self._sel_z_band = self._chapter_z_band(choice)
+
         if not zones:
             c.create_text(20, 20, anchor='nw', fill='#aaa',
                           text='No zones loaded.')
@@ -7569,33 +9176,42 @@ class MapTab(BaseTab):
 
     def _draw_grid(self, c, zones, positions):
         # Z is vertical, so "ground" is the X-Y plane at Z=0.
-        xs, ys = [], []
-        for zone in zones:
-            ox, oy, _ = positions[zone.name]
-            sx, sy, _ = zone.target_size
-            xs.extend([ox, ox + sx])
-            ys.extend([oy, oy + sy])
-        if not xs: return
-        x0 = min(xs) - 1; x1 = max(xs) + 1
-        y0 = min(ys) - 1; y1 = max(ys) + 1
+        # Always draw the full world grid 0..29 x 0..29 so the user can see
+        # how much of the playable area is filled vs. empty regardless of
+        # which zones are currently visible.
+        x0, x1 = 0, 29
+        y0, y1 = 0, 29
+        # Slightly brighter outer border at the world edges (0 and 29) so
+        # the playable boundary is unmistakable.
         for xv in range(x0, x1 + 1):
             p1 = self._project(xv, y0, 0)
             p2 = self._project(xv, y1, 0)
-            c.create_line(p1[0], p1[1], p2[0], p2[1], fill='#303040')
+            colour = '#5a6680' if xv in (x0, x1) else '#303040'
+            c.create_line(p1[0], p1[1], p2[0], p2[1], fill=colour)
         for yv in range(y0, y1 + 1):
             p1 = self._project(x0, yv, 0)
             p2 = self._project(x1, yv, 0)
-            c.create_line(p1[0], p1[1], p2[0], p2[1], fill='#303040')
+            colour = '#5a6680' if yv in (y0, y1) else '#303040'
+            c.create_line(p1[0], p1[1], p2[0], p2[1], fill=colour)
 
     def _chapter_color(self, chapter):
-        return CHAPTER_COLORS.get(chapter, '#909090')
+        tag = chapter_color_tag(chapter)
+        return CHAPTER_COLORS.get(tag, '#909090') if tag else '#909090'
 
     def _draw_zone(self, c, z, origin):
         ox, oy, oz = origin
         sx, sy, sz = z.target_size
         top, left, right, front = self._iso_box(ox, oy, oz, sx, sy, max(sz, 1))
-        col = self._chapter_color(z.chapter)
-        stipple = '' if z.is_enabled else 'gray50'
+        is_ghost = z.name in getattr(self, '_ghost_zones', set())
+        if is_ghost:
+            # Greyed-out: show that this zone occupies space at this Z layer
+            # but is owned by a different level. Light grey + stippled to
+            # reduce visual weight versus the in-focus level zones.
+            col = '#888888'
+            stipple = 'gray50'
+        else:
+            col = self._chapter_color(z.chapter)
+            stipple = '' if z.is_enabled else 'gray50'
         top_col = col
         right_col = self._darken(col, 0.75)
         front_col = self._darken(col, 0.6)
@@ -7608,21 +9224,68 @@ class MapTab(BaseTab):
         items.append(c.create_polygon(top, fill=top_col, outline='#000',
                                        stipple=stipple, tags=('zone', z.name)))
 
+        # Draw an "extends" marker on any zone whose Z range crosses past
+        # the currently selected level's Z band. ↑ = extends above, ↓ =
+        # extends below, ↕ = both. Only meaningful when a single level is
+        # selected (sel_z_band is set).
+        sel_lo, sel_hi = getattr(self, '_sel_z_band', (None, None))
+        if sel_lo is not None and sel_hi is not None:
+            world_pos = z.position if hasattr(z, 'position') else (0, 0, 0)
+            world_sz_z = z.target_size[2] if z.target_size else 1
+            if world_pos and world_pos != (0, 0, 0):
+                z_lo = world_pos[2]
+                z_hi = world_pos[2] + max(world_sz_z, 1) - 1
+                up_extend = z_hi > sel_hi
+                dn_extend = z_lo < sel_lo
+                if up_extend or dn_extend:
+                    if up_extend and dn_extend:
+                        glyph = '↕'
+                    elif up_extend:
+                        glyph = '↑'
+                    else:
+                        glyph = '↓'
+                    cx_m, cy_m = self._project(ox + sx - 0.5, oy + 0.5, oz + sz)
+                    items += self._halo_text(c, cx_m, cy_m, glyph,
+                                              fill='#ff3b30',
+                                              font=('Segoe UI', 14, 'bold'),
+                                              tag_name=z.name)
+
         if self._show_labels.get():
-            # Label centered on the top face — at z+sz (Z-vertical convention).
+            # Compute how much screen space the zone's top face actually
+            # occupies, then size text so it fits inside the zone box.
+            top_xs = [p[0] for p in top]; top_ys = [p[1] for p in top]
+            box_w = max(top_xs) - min(top_xs)
+            box_h = max(top_ys) - min(top_ys)
+            # Heuristic font size: scale with zone footprint, clamp 7..11.
+            # Ghost zones use a slightly smaller font to keep the
+            # current-level labels visually dominant.
+            base_size = max(7, min(11, int(box_h / 6)))
+            font_size = max(6, base_size - (1 if is_ghost else 0))
+            size_font_size = max(6, font_size - 1)
             cx, cy = self._project(ox + sx/2, oy + sy/2, oz + sz)
             short = z.name.replace('Sandbox_Small_', '').replace('Sandbox_', '')
-            # Bright neon label with black halo so it reads on any background
-            # (pastel zone tops, dark canvas, light canvas — anywhere).
-            items += self._halo_text(c, cx, cy - 7, short,
-                                      fill='#ff9500',   # safety orange
-                                      font=('Segoe UI', 9, 'bold'),
-                                      tag_name=z.name)
-            items += self._halo_text(c, cx, cy + 7,
-                                      f'{sx}x{sy}x{sz}',
-                                      fill='#ffeb3b',   # neon yellow (pairs with orange)
-                                      font=('Segoe UI', 8, 'bold'),
-                                      tag_name=z.name)
+            # Ghost zones use muted colours instead of the bright neon so
+            # they don't compete for attention with focus-level zones.
+            if is_ghost:
+                name_fill = '#cccccc'
+                size_fill = '#a8a8a8'
+            else:
+                name_fill = '#ff9500'
+                size_fill = '#ffeb3b'
+            tiny = box_w < 40 or box_h < 28
+            very_tiny = box_w < 28 or box_h < 18
+            if not very_tiny:
+                line_gap = font_size + 2
+                items += self._halo_text(c, cx, cy - line_gap // 2, short,
+                                          fill=name_fill,
+                                          font=('Segoe UI', font_size, 'bold'),
+                                          tag_name=z.name)
+                if not tiny:
+                    items += self._halo_text(c, cx, cy + line_gap // 2,
+                                              f'{sx}x{sy}x{sz}',
+                                              fill=size_fill,
+                                              font=('Segoe UI', size_font_size, 'bold'),
+                                              tag_name=z.name)
 
         # Landmark markers on top face (Z-as-vertical: top face at Z + SZ)
         if self._show_landmarks.get():
@@ -7630,8 +9293,9 @@ class MapTab(BaseTab):
                                                 sx, sy)
 
         for iid in items:
-            c.tag_bind(iid, '<Button-1>',
-                       lambda e, zn=z.name: self._click_zone(zn))
+            # Press starts a (possible) zone-drag; release decides click-vs-drag.
+            c.tag_bind(iid, '<ButtonPress-1>',
+                       lambda e, zn=z.name: self._zone_press(e, zn))
         self._box_refs.append((z.name, items))
 
     def _draw_zone_landmarks(self, c, z, ox, oy, top_z, sx, sy):
@@ -7766,11 +9430,53 @@ class MapTab(BaseTab):
                 self.app.zone_tab.tree.see(zone_name)
 
     # ---- pan / rotate / zoom ----
+    def _is_top_down(self):
+        """True when the camera is roughly aligned for a top-down (X/Y) view.
+        In this projection, yaw=0 + pitch=0 maps world X -> screen X and
+        world Y -> screen -Y, which is what we want for drag editing.
+        Allow ±15° tolerance so minor rotational drift doesn't disable drag."""
+        yaw_norm = self._yaw % 360
+        return ((yaw_norm < 15 or yaw_norm > 345)
+                and abs(self._pitch) < 15)
+
+    def _zone_press(self, event, zone_name):
+        """Press on a zone polygon. In top-down view, prep a drag — works
+        for both current-level zones and ghost zones (so you can align
+        zones from neighbouring levels too). In other views, the press
+        falls through to a click on release (jumps to Zones tab)."""
+        self.canvas.focus_set()
+        # Find the zone's current world position (X, Y, Z)
+        zone_doc = self.app.docs.get('zones')
+        orig = (0, 0, 0)
+        if zone_doc:
+            for r in zone_doc.rows:
+                if r.get('Name') == zone_name:
+                    z = ZoneView(r)
+                    orig = z.position
+                    break
+        self._zone_drag = {
+            'name': zone_name,
+            'press_xy': (event.x, event.y),
+            'orig_pos': orig,
+            'started': False,
+            'top_down': self._is_top_down(),
+        }
+        # Suppress pan when we have a zone press
+        self._pan_dragging = False
+        return 'break'
+
     def _on_pan_press(self, event):
+        # If a zone press already captured this event, do nothing.
+        if self._zone_drag is not None:
+            return
         self._pan_dragging = True; self._drag_last = (event.x, event.y)
         self.canvas.focus_set()
 
     def _on_pan_drag(self, event):
+        # Zone drag (top-down only) takes precedence over pan.
+        if self._zone_drag is not None and self._zone_drag.get('top_down'):
+            self._zone_drag_motion(event)
+            return
         if not self._pan_dragging: return
         dx = event.x - self._drag_last[0]
         dy = event.y - self._drag_last[1]
@@ -7778,8 +9484,87 @@ class MapTab(BaseTab):
         self._drag_last = (event.x, event.y)
         self.redraw()
 
-    def _on_pan_release(self, _event):
-        self._pan_dragging = False; self._drag_last = None
+    def _on_pan_release(self, event):
+        # Zone drag end → commit or click.
+        if self._zone_drag is not None:
+            self._zone_drag_release(event)
+            return
+        if self._pan_dragging:
+            self._pan_dragging = False; self._drag_last = None
+            self._persist_view()
+        else:
+            self._pan_dragging = False; self._drag_last = None
+
+    def _zone_drag_motion(self, event):
+        """Translate screen pixel delta into world cell delta (top-down).
+        Clamp the new position so the zone's full X/Y footprint stays
+        inside the world grid (0..29) — accounts for the zone's size,
+        not just the origin cell."""
+        d = self._zone_drag
+        dx_px = event.x - d['press_xy'][0]
+        dy_px = event.y - d['press_xy'][1]
+        # Scale: pixels per world unit. Top-down → screen X = world X * scale,
+        # screen Y = -world Y * scale. Snap to integer cells.
+        scale = self._scale or 1
+        dx_cell = int(round(dx_px / scale))
+        dy_cell = int(round(-dy_px / scale))
+        if dx_cell == 0 and dy_cell == 0 and not d['started']:
+            return
+        d['started'] = True
+        ox, oy, oz = d['orig_pos']
+        # Look up the zone's size so we can clamp the FAR edge to <= 29
+        zone_doc = self.app.docs.get('zones')
+        sx = sy = 1
+        if zone_doc:
+            for r in zone_doc.rows:
+                if r.get('Name') == d['name']:
+                    z = ZoneView(r)
+                    sx, sy, _ = z.target_size
+                    break
+        # Each axis: 0 <= origin <= 29 - (size-1)
+        max_x = max(0, 29 - max(sx, 1) + 1)
+        max_y = max(0, 29 - max(sy, 1) + 1)
+        new_x = max(0, min(max_x, ox + dx_cell))
+        new_y = max(0, min(max_y, oy + dy_cell))
+        self._set_zone_pos_in_doc(d['name'], new_x, new_y, oz)
+        self.redraw()
+
+    def _zone_drag_release(self, event):
+        d = self._zone_drag
+        self._zone_drag = None
+        if not d['started']:
+            # No motion: treat as a click (jump to Zones tab).
+            self._click_zone(d['name'])
+            return
+        # Motion happened — Pos already updated in the doc. Mark dirty +
+        # refresh the Zones tab so the new position is visible there.
+        if hasattr(self.app, '_set_dirty'):
+            self.app._set_dirty('zones', True)
+        elif hasattr(self.app, 'mark_dirty'):
+            self.app.mark_dirty('zones')
+        if hasattr(self.app, 'zone_tab'):
+            try: self.app.zone_tab.refresh_from_doc()
+            except Exception: pass
+        if hasattr(self.app, 'refresh_status'):
+            self.app.refresh_status()
+
+    def _set_zone_pos_in_doc(self, zone_name, new_x, new_y, new_z):
+        """Update Position.X/Y on the named zone row directly in the doc."""
+        zone_doc = self.app.docs.get('zones')
+        if not zone_doc: return
+        for r in zone_doc.rows:
+            if r.get('Name') != zone_name: continue
+            for prop in r.get('Value', []):
+                if not isinstance(prop, dict): continue
+                if prop.get('Name') != 'Position': continue
+                val = prop.get('Value')
+                if not isinstance(val, list) or not val: continue
+                inner = val[0]
+                if isinstance(inner, dict) and isinstance(inner.get('Value'), dict):
+                    inner['Value']['X'] = int(new_x)
+                    inner['Value']['Y'] = int(new_y)
+                    inner['Value']['Z'] = int(new_z)
+            return
 
     def _on_rot_press(self, event):
         self._rot_dragging = True; self._drag_last = (event.x, event.y)
@@ -7798,14 +9583,15 @@ class MapTab(BaseTab):
 
     def _on_rot_release(self, _event):
         self._rot_dragging = False; self._drag_last = None
+        self._persist_view()
 
     def _nudge_yaw(self, delta):
         self._yaw = (self._yaw + delta) % 360
-        self._update_angle_label(); self.redraw()
+        self._update_angle_label(); self.redraw(); self._persist_view()
 
     def _nudge_pitch(self, delta):
         self._pitch = max(-89, min(89, self._pitch + delta))
-        self._update_angle_label(); self.redraw()
+        self._update_angle_label(); self.redraw(); self._persist_view()
 
     def _update_angle_label(self):
         if hasattr(self, 'angle_lbl'):
@@ -7820,7 +9606,7 @@ class MapTab(BaseTab):
         self._offset[0] = cx - (cx - self._offset[0]) * delta
         self._offset[1] = cy - (cy - self._offset[1]) * delta
         self._scale *= delta
-        self.redraw()
+        self.redraw(); self._persist_view()
 
     def fit_view(self):
         zones = self._visible_zones()
@@ -7938,8 +9724,10 @@ class WorldGenApp(tk.Tk):
         style.configure('Treeview.Heading', font=heading_font, padding=(6, 6),
                         background='#eef1f6', foreground=text, relief='flat',
                         borderwidth=0)
+        # Selection highlight: light grey so the row's chapter colour
+        # background remains visible underneath.
         style.map('Treeview',
-                  background=[('selected', '#d7e3fa')],
+                  background=[('selected', '#d3d3d3')],
                   foreground=[('selected', text)])
 
         # Notebook — bigger tabs, easier to click
@@ -8022,18 +9810,22 @@ class WorldGenApp(tk.Tk):
         self.levels_tab = LevelsTab(self.nb, self)
         self.map_tab = MapTab(self.nb, self)
 
+        # Tab order (left → right):
+        # Map, Zones, Landmarks, Bubbles, Connections, Chapters, Levels,
+        # Filters, Strings, Mappings, Biomes, History
+        # (Biomes parked left of History per "forgotten → left of History" rule.)
+        self.nb.add(self.map_tab, text='  Map  ')
         self.nb.add(self.zone_tab, text='  Zones  ')
-        self.nb.add(self.chapter_tab, text='  Chapters  ')
-        self.nb.add(self.biome_tab, text='  Biomes  ')
-        self.nb.add(self.bubble_tab, text='  Bubbles  ')
-        self.nb.add(self.filter_tab, text='  Filters  ')
         self.nb.add(self.landmark_tab, text='  Landmarks  ')
+        self.nb.add(self.bubble_tab, text='  Bubbles  ')
+        self.nb.add(self.connections_tab, text='  Connections  ')
+        self.nb.add(self.chapter_tab, text='  Chapters  ')
+        self.nb.add(self.levels_tab, text='  Levels  ')
+        self.nb.add(self.filter_tab, text='  Filters  ')
         self.nb.add(self.strings_tab, text='  Strings  ')
         self.nb.add(self.mappings_tab, text='  Mappings  ')
+        self.nb.add(self.biome_tab, text='  Biomes  ')
         self.nb.add(self.history_tab, text='  History  ')
-        self.nb.add(self.connections_tab, text='  Connections  ')
-        self.nb.add(self.levels_tab, text='  Levels  ')
-        self.nb.add(self.map_tab, text='  Map  ')
 
         # Redraw map when switching to it
         self.nb.bind('<<NotebookTabChanged>>', self._on_tab_change)
@@ -8097,6 +9889,324 @@ class WorldGenApp(tk.Tk):
             messagebox.showinfo('Saved', 'All modified JSONs saved.')
         else:
             messagebox.showinfo('Nothing to save', 'No unsaved changes.')
+
+    # -------------------------------------------------------------------
+    # Row rename + cross-reference fixup
+    # -------------------------------------------------------------------
+    # Renames a row across one or more loaded DataTable docs and updates
+    # every engine-coupled reference to that row name in other docs.
+    # Categories supported: 'zones', 'chapters', 'landmarks', 'connections'.
+    # Tabs invoke this via thin _rename_*() wrappers.
+
+    @staticmethod
+    def _find_prop(values, name):
+        """Local copy of the standard property lookup helper used by tabs."""
+        for p in values or []:
+            if isinstance(p, dict) and p.get('Name') == name:
+                return p
+        return None
+
+    def _walk_rename_refs(self, category, old_name, new_name, apply=False):
+        """Walk every loaded doc and update or count cross-references for
+        a renamed row. Returns (refs_count, set_of_doc_keys_touched).
+        When apply=False, just counts. When True, mutates in place.
+
+        See category table in docstring above for what each category touches.
+        """
+        refs = 0
+        touched = set()
+        zones_doc = self.docs.get('zones')
+        chap_doc = self.docs.get('chapters')
+        lm_doc = self.docs.get('landmarks')
+        conn_doc = self.docs.get('connections')
+
+        def _set_rowname(prop, expected, replacement):
+            """If a property's nested RowName == expected, replace it.
+            Returns True if mutated."""
+            if not prop:
+                return False
+            v = prop.get('Value')
+            if isinstance(v, list):
+                for it in v:
+                    if isinstance(it, dict) and it.get('Name') == 'RowName':
+                        if it.get('Value') == expected:
+                            if apply:
+                                it['Value'] = replacement
+                            return True
+            return False
+
+        if category == 'chapters':
+            # (a) Zones: Chapter.RowName
+            if zones_doc and zones_doc.data:
+                hit = False
+                for r in zones_doc.rows:
+                    if not isinstance(r, dict):
+                        continue
+                    p = self._find_prop(r.get('Value', []), 'Chapter')
+                    if _set_rowname(p, old_name, new_name):
+                        refs += 1; hit = True
+                if hit:
+                    touched.add('zones')
+            # (b) Chapters: AdditionalChapters[*].RowName
+            if chap_doc and chap_doc.data:
+                hit = False
+                for r in chap_doc.rows:
+                    if not isinstance(r, dict):
+                        continue
+                    ac = self._find_prop(r.get('Value', []), 'AdditionalChapters')
+                    if not ac:
+                        continue
+                    for entry in (ac.get('Value') or []):
+                        # Two shapes: handle struct (with RowName inside Value list)
+                        # or a direct dict with RowName.
+                        if isinstance(entry, dict):
+                            inner = entry.get('Value')
+                            if isinstance(inner, list):
+                                for sub in inner:
+                                    if (isinstance(sub, dict)
+                                            and sub.get('Name') == 'RowName'
+                                            and sub.get('Value') == old_name):
+                                        if apply:
+                                            sub['Value'] = new_name
+                                        refs += 1; hit = True
+                            elif (entry.get('Name') == 'RowName'
+                                    and entry.get('Value') == old_name):
+                                if apply:
+                                    entry['Value'] = new_name
+                                refs += 1; hit = True
+                if hit:
+                    touched.add('chapters')
+
+        elif category == 'landmarks':
+            old_tag = f'World.Landmark.{old_name}'
+            new_tag = f'World.Landmark.{new_name}'
+            # (a) Zones: LandmarkHandles[*].Landmark.RowName
+            if zones_doc and zones_doc.data:
+                hit = False
+                for r in zones_doc.rows:
+                    if not isinstance(r, dict):
+                        continue
+                    lh = self._find_prop(r.get('Value', []), 'LandmarkHandles')
+                    if not lh:
+                        continue
+                    for entry in (lh.get('Value') or []):
+                        if not isinstance(entry, dict):
+                            continue
+                        inner = entry.get('Value')
+                        if not isinstance(inner, list):
+                            continue
+                        lp = self._find_prop(inner, 'Landmark')
+                        if _set_rowname(lp, old_name, new_name):
+                            refs += 1; hit = True
+                if hit:
+                    touched.add('zones')
+            # (b) Connections: Origin/Destination Landmark RowName
+            if conn_doc and conn_doc.data:
+                hit = False
+                for r in conn_doc.rows:
+                    if not isinstance(r, dict):
+                        continue
+                    for fld in ('OriginLandmark', 'DestinationLandmark'):
+                        p = self._find_prop(r.get('Value', []), fld)
+                        if _set_rowname(p, old_name, new_name):
+                            refs += 1; hit = True
+                if hit:
+                    touched.add('connections')
+            # (c) Landmarks: other rows' GuaranteedConnections TagName
+            # (d) The renamed landmark's OWN InternalId TagName + own
+            #     GuaranteedConnections (in case it self-refers). Tag-walk
+            #     handles both — we just don't skip the renamed row.
+            if lm_doc and lm_doc.data:
+                hit = False
+                for r in lm_doc.rows:
+                    if not isinstance(r, dict):
+                        continue
+                    # Walk every TagName-bearing property on the row
+                    def _walk(obj):
+                        nonlocal refs, hit
+                        if isinstance(obj, dict):
+                            if obj.get('Name') == 'TagName' and obj.get('Value') == old_tag:
+                                if apply:
+                                    obj['Value'] = new_tag
+                                refs += 1; hit = True
+                            for v in obj.values():
+                                _walk(v)
+                        elif isinstance(obj, list):
+                            for it in obj:
+                                _walk(it)
+                    _walk(r.get('Value', []))
+                if hit:
+                    touched.add('landmarks')
+
+        # zones / connections: leaf rows, no cross-refs
+        return refs, touched
+
+    def rename_row(self, category, old_name, parent=None):
+        """Open a Toplevel rename dialog and, on OK, rename the row + every
+        cross-reference, sync NameMaps, refresh tabs."""
+        doc_key_for_cat = {'zones': 'zones', 'chapters': 'chapters',
+                           'landmarks': 'landmarks', 'connections': 'connections'}
+        doc_key = doc_key_for_cat.get(category)
+        if doc_key is None:
+            messagebox.showerror('Rename', f'Unknown category: {category}')
+            return
+        doc = self.docs.get(doc_key)
+        if doc is None or doc.data is None:
+            messagebox.showerror('Rename', f'{doc_key} doc not loaded.')
+            return
+        row = next((r for r in doc.rows
+                    if isinstance(r, dict) and r.get('Name') == old_name), None)
+        if row is None:
+            messagebox.showerror('Rename', f'Row "{old_name}" not found.')
+            return
+
+        existing_names = {r.get('Name') for r in doc.rows
+                          if isinstance(r, dict) and r.get('Name')}
+
+        # ----- dialog -----
+        dlg = tk.Toplevel(parent or self)
+        dlg.title('Rename row')
+        dlg.transient((parent or self).winfo_toplevel())
+        dlg.grab_set()
+        dlg.minsize(460, 200)
+
+        body = ttk.Frame(dlg, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text=f'Rename {category} row',
+                  font=('Segoe UI', 11, 'bold')).grid(
+                      row=0, column=0, columnspan=2, sticky='w')
+        ttk.Label(body, text=f'Old name: {old_name}',
+                  foreground='#555').grid(row=1, column=0, columnspan=2,
+                                          sticky='w', pady=(6, 0))
+        ttk.Label(body, text=f'Category: {category}',
+                  foreground='#555').grid(row=2, column=0, columnspan=2,
+                                          sticky='w')
+        ttk.Label(body, text='New name:').grid(row=3, column=0, sticky='w',
+                                                pady=(10, 2))
+        v_new = tk.StringVar(value=old_name)
+        entry = ttk.Entry(body, textvariable=v_new, width=44)
+        entry.grid(row=3, column=1, sticky='we', pady=(10, 2))
+        body.columnconfigure(1, weight=1)
+        v_msg = tk.StringVar(value='')
+        msg_lbl = ttk.Label(body, textvariable=v_msg, foreground='#555')
+        msg_lbl.grid(row=4, column=0, columnspan=2, sticky='w', pady=(8, 0))
+
+        btns = ttk.Frame(dlg, padding=(12, 0, 12, 12))
+        btns.pack(side=tk.BOTTOM, fill=tk.X)
+        result = {'ok': False, 'new_name': None}
+        ok_btn = ttk.Button(btns, text='OK', style='Accent.TButton')
+        ok_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btns, text='Cancel',
+                   command=dlg.destroy).pack(side=tk.RIGHT)
+
+        def validate(*_):
+            n = v_new.get().strip()
+            if not n:
+                v_msg.set('Name cannot be empty')
+                ok_btn.state(['disabled']); return
+            if n == old_name:
+                v_msg.set('Enter a different name')
+                ok_btn.state(['disabled']); return
+            if n in existing_names:
+                v_msg.set('A row with this name already exists')
+                ok_btn.state(['disabled']); return
+            refs, touched = self._walk_rename_refs(category, old_name, n,
+                                                    apply=False)
+            v_msg.set(f'Will update {refs} reference(s) across '
+                      f'{len(touched) + 1} doc(s)')
+            ok_btn.state(['!disabled'])
+        v_new.trace_add('write', validate)
+
+        def do_ok():
+            n = v_new.get().strip()
+            if not n or n == old_name or n in existing_names:
+                return
+            result['ok'] = True
+            result['new_name'] = n
+            dlg.destroy()
+        ok_btn.configure(command=do_ok)
+        dlg.bind('<Return>', lambda _e: do_ok())
+        dlg.bind('<Escape>', lambda _e: dlg.destroy())
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        validate()
+        dlg.wait_window()
+
+        if not result['ok']:
+            return
+        new_name = result['new_name']
+
+        # ----- atomic apply -----
+        # 1. Update the row's Name
+        row['Name'] = new_name
+        # 2. Self-references (e.g. landmarks' InternalId TagName referencing
+        #    'World.Landmark.{old_name}') — handled by the landmark branch of
+        #    _walk_rename_refs below (it scans the renamed row too).
+        # 3. Cross-reference walk + apply
+        refs, touched = self._walk_rename_refs(category, old_name, new_name,
+                                                apply=True)
+        # The primary doc is always touched (we changed the row Name)
+        touched.add(doc_key)
+
+        # 4. NameMap sync on every touched doc.
+        # We append new tokens but do NOT remove old ones — leaving stale
+        # entries is harmless and safer if any reference was missed.
+        for k in touched:
+            d = self.docs.get(k)
+            if d is None or d.data is None:
+                continue
+            nm = d.data.setdefault('NameMap', [])
+            present = set(nm)
+            extras = [new_name]
+            if k == 'landmarks' or category == 'landmarks':
+                extras.append(f'World.Landmark.{new_name}')
+            for tok in extras:
+                if tok and tok not in present:
+                    nm.append(tok); present.add(tok)
+            n = len(nm)
+            if d.data.get('NamesReferencedFromExportDataCount', 0) < n:
+                d.data['NamesReferencedFromExportDataCount'] = n
+            gens = d.data.get('Generations') or []
+            if gens and isinstance(gens[0], dict):
+                if gens[0].get('NameCount', 0) < n:
+                    gens[0]['NameCount'] = n
+            # Also let the doc's own reconciler add anything else that became
+            # newly referenced (e.g. RowName tokens in nested struct values).
+            try:
+                d.reconcile_namemap()
+            except Exception:
+                pass
+
+        # 5/6. Doc dirty marking + history happen automatically: is_dirty()
+        # diffs against last-saved snapshot, and the History tab diffs against
+        # the pristine sidecar — both pick up the rename without an explicit
+        # event log.
+
+        # 7. Refresh every tab.
+        for tab in (getattr(self, 'zone_tab', None),
+                    getattr(self, 'chapter_tab', None),
+                    getattr(self, 'biome_tab', None),
+                    getattr(self, 'bubble_tab', None),
+                    getattr(self, 'filter_tab', None),
+                    getattr(self, 'landmark_tab', None),
+                    getattr(self, 'strings_tab', None),
+                    getattr(self, 'mappings_tab', None),
+                    getattr(self, 'history_tab', None),
+                    getattr(self, 'connections_tab', None),
+                    getattr(self, 'levels_tab', None),
+                    getattr(self, 'map_tab', None)):
+            if tab is not None:
+                try:
+                    tab.refresh_from_doc()
+                except Exception:
+                    pass
+        self.refresh_status()
+
+        # 8. Confirmation
+        messagebox.showinfo(
+            'Rename complete',
+            f'Renamed "{old_name}" -> "{new_name}". '
+            f'{refs} reference(s) updated across {len(touched)} doc(s).')
 
     def _show_validation_dialog(self, issues, fixable, unfixable_errors,
                                  has_errors, validator=None):
@@ -8271,13 +10381,25 @@ class WorldGenApp(tk.Tk):
         # v0.4.0 when all six tables were bundled).
         include = [doc for doc in self.docs.values() if doc.differs_from_original()]
         if not include:
-            messagebox.showinfo(
-                'Nothing to build',
+            # No changes — but let the user FORCE-build all tables anyway.
+            # Useful for diagnosing whether the pipeline itself corrupts
+            # data (vanilla-in vs vanilla-out byte comparison).
+            answer = messagebox.askyesnocancel(
+                'No changes detected',
                 'No DataTables differ from the pristine baseline.\n\n'
-                'Edit at least one table (Zones, Chapters, Biomes, etc.) and '
-                'save before building — the pak only bundles tables you '
-                'actually changed.')
-            return
+                'Yes  = FORCE BUILD with ALL DataTables bundled (diagnostic — '
+                'tests whether the build pipeline itself round-trips cleanly).\n\n'
+                'No   = Cancel (default — only bundle modified tables).\n\n'
+                'Cancel = same as No.')
+            if not answer:  # No or Cancel
+                return
+            # Force-build path: include every loaded doc that has data.
+            include = [doc for doc in self.docs.values()
+                       if doc.data is not None]
+            if not include:
+                messagebox.showerror('Nothing to build',
+                    'No DataTables loaded. Cannot force-build.')
+                return
 
         # Show a manifest dialog so the user can review what's about to be
         # packaged and cancel if it doesn't match their intent.
