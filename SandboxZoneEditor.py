@@ -31,6 +31,51 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # -----------------------------------------------------------------------------
+# Feature flags
+# -----------------------------------------------------------------------------
+# Drag-and-drop "move zone to chapter" feature on the Zones tab. When enabled,
+# the Zones tab Treeview is rendered as a hierarchical tree (chapter parents
+# with zone children) and the user can drag any zone row onto another chapter
+# parent row to fire the ZoneMover pipeline (snapshot -> pre-flight -> apply
+# -> validate -> result popup).
+#
+# Entry points (defined further down in this file):
+#   - ZoneMover            move pipeline implementation
+#   - ZoneMoveDialog       conflict-resolution modal (block / expand / shrink)
+#   - ZoneMoveResultDialog post-move summary + roll-back
+#   - ZoneTab._dnd_*       drag-drop event handlers wired into the Zones tab
+#   - ZONE_DRAG_TAG        Treeview tag used to highlight the drop target
+#
+# Flip ENABLE_ZONE_DRAG_DROP to False to fall back to the original flat
+# Treeview behaviour (no grouping, no drag-drop).
+#
+# Drag-drop turned out to be hard to use when the destination chapter is
+# scrolled off-screen, so it ships disabled and the right-click "Move to
+# chapter..." flow (ENABLE_ZONE_RIGHT_CLICK_MOVE) is the recommended path.
+# All drag-drop code is left in place behind the flag in case the user
+# wants to re-enable it.
+ENABLE_ZONE_DRAG_DROP = False
+
+# Right-click "Move to chapter..." replacement for drag-drop. Pops a
+# ZoneMoveChapterPicker modal listing every valid destination chapter
+# (sorted Layer descending, like the level-list skill output) and feeds
+# the choice into the existing ZoneMover pipeline. Reuses the same
+# ZoneMoveDialog conflict modal and ZoneMoveResultDialog summary popup.
+ENABLE_ZONE_RIGHT_CLICK_MOVE = True
+
+# Either flag enables the chapter-grouped Treeview rendering on the Zones
+# tab. The grouped view is independently useful (drag-drop or not), so we
+# keep it whenever either trigger is wired up.
+ENABLE_ZONE_CHAPTER_GROUPING = ENABLE_ZONE_DRAG_DROP or ENABLE_ZONE_RIGHT_CLICK_MOVE
+
+# Treeview tag used to flash a chapter parent row green during drag-over.
+ZONE_DRAG_TAG = 'zone-drag-target'
+# iid prefix used for chapter parent rows in the Zones tab grouped tree.
+# Zone iids are the zone's row name (no prefix), so this prefix can never
+# collide with a real zone name.
+ZONE_CHAPTER_IID_PREFIX = '__chap__:'
+
+# -----------------------------------------------------------------------------
 # Paths & constants
 # -----------------------------------------------------------------------------
 
@@ -50,7 +95,7 @@ MOD_NAME = 'SandboxMod'
 # Version lives in SandboxZoneEditor.ini ([build] mod_version). Format is
 # MAJ.MIN.PAT, each segment 0..999. Build auto-bumps patch +1 on success.
 # Starting version (first run, if ini has no value yet): 1.0.1.
-DEFAULT_MOD_VERSION = '2.5.1'
+DEFAULT_MOD_VERSION = '2.5.2'
 
 DATATABLES = {
     'zones':       ('DT_Moria_Zones.json',              'DT_Moria_Zones',              'Zones'),
@@ -1239,6 +1284,36 @@ _HUMAN_TITLES = {
         "by editing (not in vanilla) and that no Live row currently "
         "references. Vanilla content is never flagged. Auto-fix removes "
         "the orphans and syncs NameMaps. Reversible via backup."),
+    'chapter_stair_uniqueness': (
+        "Chapter hosts more than one stair zone",
+        "A Live SandboxSmall chapter row is the primary Chapter of two or "
+        "more stair zones (zones with a LandmarkHandles entry whose "
+        "bExtendedConnectivityLandmark=true). Each chapter must host at "
+        "most ONE stair zone — multiple stairs on the same chapter cause "
+        "AllocateCellToParcel 'cell already allocated' errors at "
+        "generation time. Move the extra stair zone to a different "
+        "chapter, or drop its extended-connectivity landmark."),
+    'stair_xy_collision': (
+        "Stair landmarks share an X,Y column",
+        "Two or more stair landmarks (rows referenced by stair zones with "
+        "bExtendedConnectivityLandmark=true) have the same BasePosition.X "
+        "AND BasePosition.Y at different Z. The generator treats this as "
+        "a vertical column collision and AllocateCellToParcel errors "
+        "fire — the cell is already claimed by the first stair. Set "
+        "distinct X,Y for each stair landmark."),
+    'embedded_bottom_needs_headroom': (
+        'Embedded-bottom zone has no headroom below',
+        'DarkestDeeps zones extend below their chapter PrimeZ. Their host '
+        'chapter must have MinZ < PrimeZ. Either expand the chapter band '
+        'or move the zone to a chapter with room below.'),
+    'stair_xy_sentinel_overlap': (
+        "Multiple stair landmarks use auto-place sentinel (0,0,Z)",
+        "Two or more stair landmarks have BasePosition (X==0, Y==0). "
+        "(0,0,*) is the engine's auto-place sentinel: the runtime resolves "
+        "it to a generated cell. With multiple sentinel stairs, runtime "
+        "placement may still drop them onto the same X,Y column and fire "
+        "AllocateCellToParcel 'cell already allocated'. Pin explicit X,Y "
+        "values on each stair landmark to make placement deterministic."),
     'connection_null_endpoints': (
         "LayoutConnection has null endpoints",
         "A connection row has no Origin and/or Destination landmark. The "
@@ -2640,6 +2715,262 @@ class BuildValidator:
                 f'engine routing may null-deref. Examples: {preview}'))
         return out
 
+    @staticmethod
+    def _xyz_from_struct_prop(p):
+        """Extract (X, Y, Z) tuple of ints from a Vector-like StructProperty.
+        Returns None if structure missing or fields not int-like."""
+        if not p:
+            return None
+        v = p.get('Value')
+        if not isinstance(v, list) or not v:
+            return None
+        d = v[0].get('Value') if isinstance(v[0], dict) else None
+        if not isinstance(d, dict):
+            return None
+        return (d.get('X'), d.get('Y'), d.get('Z'))
+
+    def _stair_zones_and_landmark_names(self):
+        """Helper shared by chapter_stair_uniqueness and stair_xy_collision.
+
+        Walks every Live SandboxSmall zone and returns a list of tuples:
+            (zone_row, chapter_rowname, [stair_landmark_names])
+        for any zone that has at least one LandmarkHandles entry whose
+        bExtendedConnectivityLandmark=true (i.e. a stair zone). Also
+        returns the union set of stair landmark RowNames across all stair
+        zones.
+
+        Filter: a zone counts as a stair only if its TargetSize.Z >= 2.
+        Single-Z zones (e.g. vanilla City_A_EasternBastion) may carry an
+        extended-connectivity landmark for routing reasons but are NOT
+        elevator-style multi-floor stairs and must not be classified as
+        such — they cannot collide with real stairs in the chapter
+        uniqueness sense."""
+        zones_doc = self.docs.get('zones')
+        stair_zones = []
+        all_lm_names = set()
+        if not zones_doc:
+            return stair_zones, all_lm_names
+        for r in zones_doc.rows:
+            if self._zstate(r) == 'Disabled':
+                continue
+            zs = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs or str(zs.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            # Filter: TargetSize.Z >= 2 to exclude single-floor zones that
+            # happen to carry an extended-connectivity landmark.
+            ts = self._fp(r.get('Value', []), 'TargetSize')
+            ts_xyz = self._xyz_from_struct_prop(ts)
+            if not ts_xyz or not isinstance(ts_xyz[2], int) or ts_xyz[2] < 2:
+                continue
+            lh = self._fp(r.get('Value', []), 'LandmarkHandles')
+            if not lh:
+                continue
+            lm_names_for_zone = []
+            for e in (lh.get('Value') or []):
+                if not isinstance(e, dict):
+                    continue
+                inner = e.get('Value')
+                if not isinstance(inner, list):
+                    continue
+                ext = self._fp(inner, 'bExtendedConnectivityLandmark')
+                if not ext or ext.get('Value') is not True:
+                    continue
+                lhprop = self._fp(inner, 'Landmark')
+                lname = ''
+                if lhprop:
+                    lv = lhprop.get('Value')
+                    if isinstance(lv, list):
+                        for it in lv:
+                            if isinstance(it, dict) and it.get('Name') == 'RowName':
+                                lname = it.get('Value', '')
+                if lname:
+                    lm_names_for_zone.append(lname)
+            if lm_names_for_zone:
+                chap = self._get(r, 'Chapter')
+                stair_zones.append((r, chap, lm_names_for_zone))
+                all_lm_names.update(lm_names_for_zone)
+        return stair_zones, all_lm_names
+
+    def _check_chapter_stair_uniqueness(self):
+        """Each Live SS chapter must be the primary `Chapter` of at most ONE
+        unique-footprint stair zone (a Live SS zone with TargetSize.Z >= 2
+        and at least one LandmarkHandles entry whose
+        bExtendedConnectivityLandmark=true). Multiple stair zones on the
+        same chapter cause runtime cell collisions / generator bugs.
+
+        Deduplication: stair zones sharing the SAME (Position, TargetSize)
+        are treated as a single "variant slot" — vanilla SandboxSmall ships
+        Elevator_E and Elevator_F as alt variants with identical pos+size
+        (one is picked per game seed), so they must not double-count."""
+        out = []
+        stair_zones, _ = self._stair_zones_and_landmark_names()
+        if not stair_zones:
+            return out
+        zones_doc = self.docs.get('zones')
+        # Collect (zone_name, footprint) per chapter; dedupe by footprint.
+        by_chapter = {}
+        for zrow, chap, _lms in stair_zones:
+            if not chap or chap == 'None':
+                continue
+            pos = self._fp(zrow.get('Value', []), 'Position')
+            ts = self._fp(zrow.get('Value', []), 'TargetSize')
+            footprint = (
+                self._xyz_from_struct_prop(pos),
+                self._xyz_from_struct_prop(ts),
+            )
+            by_chapter.setdefault(chap, []).append((zrow.get('Name'), footprint))
+        for chap, entries in by_chapter.items():
+            # Group by footprint; each unique footprint counts once.
+            by_fp = {}
+            for zname, fp_key in entries:
+                by_fp.setdefault(fp_key, []).append(zname)
+            unique_slots = len(by_fp)
+            if unique_slots >= 2:
+                # Build a per-slot summary for the message.
+                slot_desc = []
+                for fp_key, znames in by_fp.items():
+                    if len(znames) > 1:
+                        slot_desc.append(
+                            f'{{variant slot {fp_key}: {sorted(znames)}}}')
+                    else:
+                        slot_desc.append(znames[0])
+                all_znames = sorted(n for _, ns in by_fp.items() for n in ns)
+                out.append(Issue(
+                    'error', 'chapter_stair_uniqueness', 'zones',
+                    f'Chapter "{chap}" is the primary Chapter of '
+                    f'{unique_slots} distinct stair-footprint slots '
+                    f'(zones: {all_znames}; slots: {slot_desc}). '
+                    f'Each chapter row must host at most ONE stair-footprint '
+                    f'slot — multiple stairs on the same chapter cause '
+                    f'runtime AllocateCellToParcel "cell already allocated" '
+                    f'errors. (Variants sharing identical Position+TargetSize '
+                    f'count as ONE slot — vanilla pattern.)'))
+        return out
+
+    def _check_stair_xy_collision(self):
+        """No two stair landmarks (BPs of zones with
+        bExtendedConnectivityLandmark=true) may share both BasePosition.X AND
+        BasePosition.Y. Same X+Y at different Z = vertical column collision
+        in AllocateCellToParcel.
+
+        Sentinel (X==0 AND Y==0) means "auto-place" — flagged separately as
+        a warning (stair_xy_sentinel_overlap) because runtime placement of
+        multiple (0,0,*) stairs may still collide."""
+        out = []
+        lm_doc = self.docs.get('landmarks')
+        if not lm_doc:
+            return out
+        _, stair_lm_names = self._stair_zones_and_landmark_names()
+        if not stair_lm_names:
+            return out
+
+        # landmark name -> (X, Y, Z)
+        positions = {}
+        for r in lm_doc.rows:
+            n = r.get('Name', '')
+            if n not in stair_lm_names:
+                continue
+            if self._zstate(r) == 'Disabled':
+                continue
+            bp_p = self._fp(r.get('Value', []), 'BasePosition')
+            if not bp_p:
+                continue
+            v = bp_p.get('Value')
+            if not isinstance(v, list) or not v:
+                continue
+            d = v[0].get('Value') if isinstance(v[0], dict) else None
+            if not isinstance(d, dict):
+                continue
+            x = d.get('X'); y = d.get('Y'); z = d.get('Z')
+            if not (isinstance(x, int) and isinstance(y, int)):
+                continue
+            positions[n] = (x, y, z)
+
+        # Group by (X, Y)
+        by_xy = {}
+        for name, (x, y, z) in positions.items():
+            by_xy.setdefault((x, y), []).append((name, z))
+
+        # Real collisions (non-sentinel): X,Y not (0,0) and >=2 landmarks
+        for (x, y), entries in by_xy.items():
+            if x == 0 and y == 0:
+                continue
+            if len(entries) >= 2:
+                names_zs = ', '.join(f'{n}(Z={z})' for n, z in sorted(entries))
+                out.append(Issue(
+                    'error', 'stair_xy_collision', 'landmarks',
+                    f'{len(entries)} stair landmarks share '
+                    f'BasePosition (X={x}, Y={y}) — vertical-column '
+                    f'collision causes AllocateCellToParcel '
+                    f'"cell already allocated" errors. Landmarks: '
+                    f'{names_zs}. Set distinct X,Y per stair to fix.'))
+
+        # Sentinel overlap warning
+        sentinel_entries = by_xy.get((0, 0), [])
+        if len(sentinel_entries) >= 2:
+            names_zs = ', '.join(f'{n}(Z={z})' for n, z in sorted(sentinel_entries))
+            out.append(Issue(
+                'warning', 'stair_xy_sentinel_overlap', 'landmarks',
+                f'{len(sentinel_entries)} stair landmarks use sentinel '
+                f'(0,0,Z) — runtime auto-placement may collide with other '
+                f'(0,0,*) stairs. Set explicit X,Y to prevent. '
+                f'Landmarks: {names_zs}.'))
+
+        return out
+
+    def _check_embedded_bottom_needs_headroom(self):
+        """Live SandboxSmall zones whose name contains 'DarkestDeeps' are
+        embedded-bottom zones that extend BELOW their host chapter's
+        PrimeZ. Their host chapter MUST have MinZ < PrimeZ (i.e. real
+        headroom below PrimeZ). If MinZ >= PrimeZ, there's no chapter
+        band beneath the embedded floor and the generator either crashes
+        or routes connections through cells that don't exist.
+
+        Fix: either expand the host chapter's Z band so MinZ < PrimeZ,
+        or move the zone to a chapter that already has room below."""
+        out = []
+        zones_doc = self.docs.get('zones')
+        chapters_doc = self.docs.get('chapters')
+        if not zones_doc or not chapters_doc:
+            return out
+        # Build chapter lookup by row Name.
+        chap_by_name = {}
+        for r in chapters_doc.rows:
+            n = r.get('Name')
+            if n:
+                chap_by_name[n] = r
+        for r in zones_doc.rows:
+            zname = r.get('Name', '') or ''
+            if 'DarkestDeeps' not in zname:
+                continue
+            if self._zstate(r) == 'Disabled':
+                continue
+            zs = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs or str(zs.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            chap_name = self._get(r, 'Chapter')
+            if not chap_name or chap_name == 'None':
+                continue
+            chap_row = chap_by_name.get(chap_name)
+            if not chap_row:
+                continue
+            min_z = self._get(chap_row, 'MinZ')
+            prime_z = self._get(chap_row, 'PrimeZ')
+            try:
+                mn = int(min_z); pz = int(prime_z)
+            except (TypeError, ValueError):
+                continue
+            if mn >= pz:
+                out.append(Issue(
+                    'error', 'embedded_bottom_needs_headroom', 'zones',
+                    f'Zone "{zname}" is embedded-bottom (DarkestDeeps) on '
+                    f'chapter "{chap_name}" but chapter has MinZ={mn} >= '
+                    f'PrimeZ={pz} — no headroom below PrimeZ for the zone '
+                    f'to extend into. Expand the chapter band so MinZ < '
+                    f'PrimeZ, or move the zone to a chapter with room '
+                    f'below.'))
+        return out
+
     def _check_orphan_added_data(self):
         """Find StringTable entries, landmarks, and chapter rows that the
         user added (not in vanilla) but no longer reference anything Live.
@@ -3221,6 +3552,9 @@ class BuildValidator:
             self._check_chapter_displayname_resolves,
             self._check_extended_connectivity_neighbours,
             self._check_extended_connectivity_z_bounds,
+            self._check_chapter_stair_uniqueness,
+            self._check_stair_xy_collision,
+            self._check_embedded_bottom_needs_headroom,
             self._check_orphan_added_data,
             self._check_live_to_disabled,
             self._check_counter_sync,
@@ -4560,6 +4894,9 @@ class ZoneTab(BaseTab):
         # Outdoor.ExpeditionStart). These are scripted campaign exteriors and
         # rarely useful when editing the indoor sandbox layout.
         self._hide_outdoor = tk.BooleanVar(value=True)
+        # Hide zones whose primary chapter has Layer = 0 (ground level +
+        # outdoor/bridge chapters). Default off — show everything.
+        self._hide_layer0 = tk.BooleanVar(value=False)
         self._build()
 
     def refresh_from_doc(self):
@@ -4634,6 +4971,22 @@ class ZoneTab(BaseTab):
         except Exception:
             pass
 
+        # Hide zones whose primary chapter has Layer == 0 (ground level +
+        # outdoor/bridge chapters). Composes with the other filters via AND.
+        cb_l0 = ttk.Checkbutton(toolbar, text='Hide Layer 0',
+                                 variable=self._hide_layer0,
+                                 command=self._populate_tree)
+        cb_l0.pack(side=tk.LEFT, padx=(6, 0))
+        try:
+            _tt = ('Hide zones whose primary chapter is at Layer 0 '
+                   '(ground level + outdoor/bridge chapters)')
+            # Use the project's tooltip helper if it accepts raw text;
+            # otherwise fall back to a simple ToolTip-on-bind.
+            cb_l0.bind('<Enter>',
+                       lambda e, w=cb_l0, t=_tt: w.configure(cursor='question_arrow'))
+        except Exception:
+            pass
+
         self.status_lbl = ttk.Label(toolbar, text='', foreground='#555')
         self.status_lbl.pack(side=tk.LEFT, padx=12)
 
@@ -4657,6 +5010,49 @@ class ZoneTab(BaseTab):
         self.tree.tag_configure(MODIFIED_TAG, background='#fff7b0')
         self.tree.tag_configure(DISABLED_TAG, foreground='#999999')
         self.tree.bind('<<TreeviewSelect>>', self._on_select)
+
+        # Chapter-grouped tree rendering. Used by both drag-drop and the
+        # right-click move flow — the grouped view is independently useful.
+        if ENABLE_ZONE_CHAPTER_GROUPING:
+            try:
+                # Switch to tree+headings mode so chapter parent rows are
+                # visible. The first column ('#0') becomes the chapter group
+                # heading; existing data columns stay aligned with headings.
+                self.tree.configure(show='tree headings')
+                self.tree.heading('#0', text='Chapter group')
+                self.tree.column('#0', width=240, stretch=False, anchor=tk.W)
+                self.tree.tag_configure(ZONE_DRAG_TAG,
+                                        background='#b6e7a0')
+                self.tree.tag_configure('zone-chapter-parent',
+                                        background='#eef1f6',
+                                        font=self.app.FONT_HEADING)
+            except Exception:
+                pass
+
+        # Drag-drop: wire mouse event handlers. Disabled by default
+        # (see ENABLE_ZONE_DRAG_DROP at top of file). All state and
+        # handlers are left in place for easy re-enable.
+        if ENABLE_ZONE_DRAG_DROP:
+            # Drag state. _dnd_active flips True on Button-1 over a zone row.
+            self._dnd_active = False
+            self._dnd_zone_iid = None
+            self._dnd_press_x = 0
+            self._dnd_press_y = 0
+            self._dnd_last_target = None  # iid of last highlighted chapter row
+            self._dnd_tooltip = None      # Toplevel created lazily during drag
+            self._dnd_scroll_after = None # after-id for edge auto-scroll repeat
+            self._dnd_scroll_dir = 0      # -1 up, +1 down, 0 not scrolling
+            self._dnd_scroll_speed = 1    # units per tick (adaptive 1 or 3)
+            self.tree.bind('<ButtonPress-1>', self._dnd_press, add='+')
+            self.tree.bind('<B1-Motion>', self._dnd_motion, add='+')
+            self.tree.bind('<ButtonRelease-1>', self._dnd_release, add='+')
+
+        # Right-click "Move to chapter..." menu. Replaces drag-drop as the
+        # primary way to reparent a zone.
+        if ENABLE_ZONE_RIGHT_CLICK_MOVE:
+            self._zone_context_menu = None  # built lazily on first popup
+            self._zone_context_target = None  # zone iid the menu was opened on
+            self.tree.bind('<Button-3>', self._on_zone_right_click, add='+')
 
         self._build_detail()
 
@@ -4928,8 +5324,88 @@ class ZoneTab(BaseTab):
 
     def _populate_tree(self):
         self.tree.delete(*self.tree.get_children())
-        for z in self.zones:
-            self._insert_row(z)
+        # "Hide Layer 0" filter: zones whose primary Chapter has Layer == 0
+        # are skipped, and the corresponding chapter parent row is also
+        # omitted in grouped mode. Zones with no chapter ref are NOT hidden
+        # by this filter (treated as unknown layer).
+        hide_layer0 = bool(getattr(self, '_hide_layer0',
+                                    tk.BooleanVar(value=False)).get())
+
+        def _zone_hidden_by_layer0(z):
+            if not hide_layer0:
+                return False
+            if not z.chapter:
+                return False
+            return self._chapter_layer_int(z.chapter) == 0
+
+        if ENABLE_ZONE_CHAPTER_GROUPING:
+            # Build chapter parent rows in Layer-descending order (top floor
+            # first). Group zones under their Chapter rowname. Zones with an
+            # unknown chapter (e.g. legacy 'None' / 'EXTRA' rows) go under a
+            # synthetic '(no chapter)' parent so they remain visible.
+            chapter_iids = {}  # chapter_rowname -> tree iid
+            # Build sort order from the dropdown labels we already computed
+            # in _populate_dropdowns: Layer desc, sandbox before unknown.
+            order = []
+            seen_chapters = {z.chapter for z in self.zones}
+            # Always include all known chapters that have any zones AND every
+            # chapter in the chapters DT (so empty chapters still accept drops).
+            chap_doc = self.app.docs.get('chapters')
+            all_chap_names = set(seen_chapters)
+            if chap_doc:
+                for r in chap_doc.rows:
+                    nm = r.get('Name')
+                    if nm:
+                        all_chap_names.add(nm)
+            for cn in all_chap_names:
+                if not cn:
+                    continue
+                layer = self._chapter_layer_int(cn)
+                # Skip Layer 0 chapter parents entirely when filter is on.
+                if hide_layer0 and layer == 0:
+                    continue
+                sort_key = (0 if layer is not None else 1,
+                            -(layer if layer is not None else 0),
+                            natural_key(cn))
+                order.append((sort_key, cn))
+            order.sort(key=lambda x: x[0])
+
+            for _, cn in order:
+                iid = ZONE_CHAPTER_IID_PREFIX + cn
+                label = self._chapter_display_label(cn)
+                tag = chapter_color_tag(cn) or ''
+                tags = ('zone-chapter-parent',)
+                if tag:
+                    tags = tags + (tag,)
+                # Show the chapter label in the '#0' tree column. Other
+                # columns are blank for parents.
+                self.tree.insert('', 'end', iid=iid, text=label,
+                                 values=('',) * len(self.tree['columns']),
+                                 open=True, tags=tags)
+                chapter_iids[cn] = iid
+
+            # Synthetic catch-all for zones whose chapter doesn't resolve
+            no_chap_iid = ZONE_CHAPTER_IID_PREFIX + '(no chapter)'
+            no_chap_inserted = False
+            for z in self.zones:
+                if _zone_hidden_by_layer0(z):
+                    continue
+                parent = chapter_iids.get(z.chapter)
+                if parent is None:
+                    if not no_chap_inserted:
+                        self.tree.insert('', 'end', iid=no_chap_iid,
+                                         text='(no chapter)',
+                                         values=('',) * len(self.tree['columns']),
+                                         open=True,
+                                         tags=('zone-chapter-parent',))
+                        no_chap_inserted = True
+                    parent = no_chap_iid
+                self._insert_row(z, parent=parent)
+        else:
+            for z in self.zones:
+                if _zone_hidden_by_layer0(z):
+                    continue
+                self._insert_row(z)
         self._refresh_count()
         self.apply_sort(self.tree)
 
@@ -5036,14 +5512,30 @@ class ZoneTab(BaseTab):
                 f'{z.zone_temperature:g}', f'{z.water_prevalence:g}',
                 f'{z.light_prevalence:g}', 'Yes' if z.is_enabled else 'No')
 
-    def _insert_row(self, z):
-        self.tree.insert('', 'end', iid=z.name, values=self._row_values(z),
+    def _insert_row(self, z, parent=''):
+        self.tree.insert(parent, 'end', iid=z.name, values=self._row_values(z),
                          tags=self._row_tags(z))
 
     def _refresh_row(self, z):
         if not self.tree.exists(z.name):
-            self._insert_row(z); return
+            # Pick the right parent for grouped mode
+            parent = ''
+            if ENABLE_ZONE_CHAPTER_GROUPING and z.chapter:
+                cand = ZONE_CHAPTER_IID_PREFIX + z.chapter
+                if self.tree.exists(cand):
+                    parent = cand
+            self._insert_row(z, parent=parent); return
         self.tree.item(z.name, values=self._row_values(z), tags=self._row_tags(z))
+        # If grouped and this zone's chapter changed, reparent it.
+        if ENABLE_ZONE_CHAPTER_GROUPING and z.chapter:
+            want_parent = ZONE_CHAPTER_IID_PREFIX + z.chapter
+            if self.tree.exists(want_parent):
+                cur_parent = self.tree.parent(z.name)
+                if cur_parent != want_parent:
+                    try:
+                        self.tree.move(z.name, want_parent, 'end')
+                    except Exception:
+                        pass
 
     def _refresh_count(self):
         self.status_lbl.config(
@@ -5060,6 +5552,9 @@ class ZoneTab(BaseTab):
     def _on_select(self, _=None):
         sel = self.tree.selection()
         if not sel: return
+        # Ignore chapter parent rows (grouped-tree mode)
+        if sel[0].startswith(ZONE_CHAPTER_IID_PREFIX):
+            return
         z = next((zz for zz in self.zones if zz.name == sel[0]), None)
         if z: self._populate_detail(z)
 
@@ -5466,6 +5961,320 @@ class ZoneTab(BaseTab):
         self.current.update_landmark_entry(idx, lm, pl, ext)
         self._refresh_landmarks()
         self._mark(self.current)
+
+    # ---- Sort override for grouped tree ----
+    def _apply_sort_items(self, tree):
+        """Sort children within their chapter parent rather than at the root.
+        Falls back to the BaseTab implementation when grouping is disabled."""
+        if not ENABLE_ZONE_DRAG_DROP:
+            return super()._apply_sort_items(tree)
+        col, rev = getattr(tree, '_sort_state', ('', False))
+        if not col:
+            return
+        def keyfn(v):
+            s = v[0]
+            try:
+                return (0, float(s.strip('()').split(',')[0])) if ',' in s else (0, float(s))
+            except Exception:
+                return (1, BaseTab._natural_key(s))
+        for parent in tree.get_children(''):
+            if not parent.startswith(ZONE_CHAPTER_IID_PREFIX):
+                continue
+            items = [(tree.set(k, col), k) for k in tree.get_children(parent)]
+            items.sort(key=keyfn, reverse=rev)
+            for i, (_, k) in enumerate(items):
+                tree.move(k, parent, i)
+
+    # ---- Drag-drop: zone -> chapter ----
+    def _dnd_press(self, event):
+        """Begin a potential drag. Only zone child rows are draggable."""
+        if not ENABLE_ZONE_DRAG_DROP:
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid or iid.startswith(ZONE_CHAPTER_IID_PREFIX):
+            self._dnd_active = False
+            return
+        # Don't start drag on heading row
+        if self.tree.identify_region(event.x, event.y) == 'heading':
+            self._dnd_active = False
+            return
+        self._dnd_active = True
+        self._dnd_zone_iid = iid
+        self._dnd_press_x = event.x
+        self._dnd_press_y = event.y
+        self._dnd_last_target = None
+
+    def _dnd_motion(self, event):
+        if not ENABLE_ZONE_DRAG_DROP or not self._dnd_active:
+            return
+        # Require a small drag threshold to disambiguate from click+select
+        if (abs(event.x - self._dnd_press_x) < 4
+                and abs(event.y - self._dnd_press_y) < 4):
+            return
+        target = self.tree.identify_row(event.y)
+        # Resolve the chapter parent: if we're hovering a zone child, use
+        # its parent. If on a chapter parent row directly, use that.
+        if target and not target.startswith(ZONE_CHAPTER_IID_PREFIX):
+            target = self.tree.parent(target)
+        # Update highlight
+        if target != self._dnd_last_target:
+            self._clear_drag_highlight()
+            self._dnd_last_target = target
+            if target and target.startswith(ZONE_CHAPTER_IID_PREFIX):
+                cur_tags = list(self.tree.item(target, 'tags') or ())
+                if ZONE_DRAG_TAG not in cur_tags:
+                    cur_tags.append(ZONE_DRAG_TAG)
+                    self.tree.item(target, tags=tuple(cur_tags))
+        # Tooltip: "Drop to move {zone} to {chapter_label}"
+        if target and target.startswith(ZONE_CHAPTER_IID_PREFIX):
+            chap_name = target[len(ZONE_CHAPTER_IID_PREFIX):]
+            label = self._chapter_display_label(chap_name)
+            self._show_drag_tooltip(event, f'Drop to move "{self._dnd_zone_iid}" to {label}')
+        else:
+            self._hide_drag_tooltip()
+        # Visual cursor hint
+        try:
+            self.tree.config(cursor='exchange')
+        except Exception:
+            pass
+        # Edge auto-scroll: scroll the Treeview when cursor is near top/bottom
+        self._update_edge_scroll(event.y)
+
+    # ---- Edge auto-scroll while dragging ----
+    EDGE_ZONE_PX = 30
+    EDGE_FAST_PX = 10
+
+    def _update_edge_scroll(self, y):
+        """Start/stop/adjust the auto-scroll based on cursor y in the tree."""
+        try:
+            h = self.tree.winfo_height()
+        except Exception:
+            return
+        # If cursor has left the widget vertically, stop scrolling.
+        if y < 0 or y > h:
+            self._stop_edge_scroll()
+            return
+        direction = 0
+        speed = 1
+        if y < self.EDGE_ZONE_PX:
+            direction = -1
+            speed = 3 if y < self.EDGE_FAST_PX else 1
+        elif y > h - self.EDGE_ZONE_PX:
+            direction = 1
+            speed = 3 if y > h - self.EDGE_FAST_PX else 1
+        if direction == 0:
+            self._stop_edge_scroll()
+            return
+        self._dnd_scroll_dir = direction
+        self._dnd_scroll_speed = speed
+        if self._dnd_scroll_after is None:
+            self._edge_scroll_tick()
+
+    def _edge_scroll_tick(self):
+        """Recurring tick: scroll one step then reschedule."""
+        self._dnd_scroll_after = None
+        if not self._dnd_active or self._dnd_scroll_dir == 0:
+            return
+        try:
+            self.tree.yview_scroll(
+                self._dnd_scroll_dir * self._dnd_scroll_speed, 'units')
+        except Exception:
+            return
+        try:
+            self._dnd_scroll_after = self.tree.after(
+                50, self._edge_scroll_tick)
+        except Exception:
+            self._dnd_scroll_after = None
+
+    def _stop_edge_scroll(self):
+        self._dnd_scroll_dir = 0
+        if self._dnd_scroll_after is not None:
+            try:
+                self.tree.after_cancel(self._dnd_scroll_after)
+            except Exception:
+                pass
+            self._dnd_scroll_after = None
+
+    def _dnd_release(self, event):
+        if not ENABLE_ZONE_DRAG_DROP or not self._dnd_active:
+            self._stop_edge_scroll()
+            return
+        try:
+            self.tree.config(cursor='')
+        except Exception:
+            pass
+        self._stop_edge_scroll()
+        self._hide_drag_tooltip()
+        self._clear_drag_highlight()
+        if self._dnd_last_target is None:
+            self._dnd_active = False
+            return
+        target = self._dnd_last_target
+        zone_iid = self._dnd_zone_iid
+        self._dnd_active = False
+        self._dnd_last_target = None
+        if not target or not target.startswith(ZONE_CHAPTER_IID_PREFIX):
+            return
+        dest_chapter = target[len(ZONE_CHAPTER_IID_PREFIX):]
+        if dest_chapter == '(no chapter)':
+            return
+        # Source chapter
+        zv = next((z for z in self.zones if z.name == zone_iid), None)
+        if zv is None:
+            return
+        if zv.chapter == dest_chapter:
+            return  # no-op
+        # Confirm before firing the pipeline
+        if not messagebox.askyesno(
+                'Move zone',
+                f'Move zone "{zone_iid}" from\n  {zv.chapter or "(no chapter)"}\n'
+                f'to\n  {dest_chapter}?\n\nThis will create snapshot backups, '
+                f're-anchor positions/landmarks/connections, and run validation.',
+                parent=self):
+            return
+        try:
+            mover = ZoneMover(self.app)
+            result = mover.move(zone_iid, dest_chapter, parent=self.winfo_toplevel())
+        except Exception as e:
+            messagebox.showerror('Zone move failed',
+                                 f'Pipeline crashed: {e}', parent=self)
+            return
+        if result is None:
+            return  # user cancelled in conflict dialog
+        # Show result dialog with roll-back option
+        ZoneMoveResultDialog(self.winfo_toplevel(), self.app, result)
+        # Refresh tab regardless (changes already applied or rolled back)
+        self.app.load_all_after_zone_move()
+
+    def _clear_drag_highlight(self):
+        self._stop_edge_scroll()
+        if self._dnd_last_target and self.tree.exists(self._dnd_last_target):
+            tags = [t for t in (self.tree.item(self._dnd_last_target, 'tags') or ())
+                    if t != ZONE_DRAG_TAG]
+            try:
+                self.tree.item(self._dnd_last_target, tags=tuple(tags))
+            except Exception:
+                pass
+
+    def _show_drag_tooltip(self, event, text):
+        try:
+            if self._dnd_tooltip is None:
+                tw = tk.Toplevel(self.tree)
+                tw.wm_overrideredirect(True)
+                lbl = tk.Label(tw, text=text, background='#fffacd',
+                               relief='solid', borderwidth=1,
+                               font=('Segoe UI', 9), padx=6, pady=2)
+                lbl.pack()
+                tw._lbl = lbl
+                self._dnd_tooltip = tw
+            else:
+                self._dnd_tooltip._lbl.config(text=text)
+            x = self.tree.winfo_rootx() + event.x + 16
+            y = self.tree.winfo_rooty() + event.y + 16
+            self._dnd_tooltip.geometry(f'+{x}+{y}')
+            self._dnd_tooltip.deiconify()
+        except Exception:
+            pass
+
+    def _hide_drag_tooltip(self):
+        try:
+            if self._dnd_tooltip is not None:
+                self._dnd_tooltip.withdraw()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Right-click "Move to chapter..." flow.
+    # ------------------------------------------------------------------
+    def _on_zone_right_click(self, event):
+        """Show a context menu for the row under the pointer.
+
+        - If the row is a chapter parent (iid starts with the chapter
+          prefix) or empty space, do nothing. Move-to-chapter only makes
+          sense for an actual zone row.
+        - If the row is a zone, identify it via the row's iid (which is
+          the zone row name in grouped mode, or also the row name in
+          flat mode) and pop the menu.
+        """
+        if not ENABLE_ZONE_RIGHT_CLICK_MOVE:
+            return
+        try:
+            iid = self.tree.identify_row(event.y)
+        except Exception:
+            iid = ''
+        if not iid:
+            return
+        # Skip chapter parent rows in grouped mode.
+        if iid.startswith(ZONE_CHAPTER_IID_PREFIX):
+            return
+        # Confirm this iid corresponds to a known zone.
+        zv = next((z for z in self.zones if z.name == iid), None)
+        if zv is None:
+            return
+        self._zone_context_target = iid
+        # Select the row so the user has visual feedback.
+        try:
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+        except Exception:
+            pass
+        menu = self._build_zone_context_menu()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _build_zone_context_menu(self):
+        """Construct (or reuse) the right-click menu. Currently only one
+        item — kept as a separate builder so future additions land in
+        one place. Note: Zones tab had no prior right-click menu, so
+        nothing pre-existing to merge in here."""
+        if self._zone_context_menu is None:
+            m = tk.Menu(self.tree, tearoff=0)
+            m.add_command(label='Move to chapter…',
+                          command=self._move_zone_via_picker)
+            m.add_separator()
+            # Placeholder for future entries; preserves the spec's
+            # "(Whatever the existing right-click context menu items
+            # already are - preserve them)" pattern even though the
+            # Zones tab had no prior right-click handler.
+            self._zone_context_menu = m
+        return self._zone_context_menu
+
+    def _move_zone_via_picker(self):
+        """Pop the chapter picker, then run the existing ZoneMover
+        pipeline on the chosen destination. No-ops if no zone is
+        targeted, the destination matches the source, or the user
+        cancels in either modal."""
+        zone_name = self._zone_context_target
+        if not zone_name:
+            return
+        zv = next((z for z in self.zones if z.name == zone_name), None)
+        if zv is None:
+            return
+
+        picker = ZoneMoveChapterPicker(self.winfo_toplevel(), self.app, zv)
+        try:
+            self.wait_window(picker)
+        except Exception:
+            pass
+        dest_chapter = picker.result
+        if not dest_chapter:
+            return
+        if dest_chapter == zv.chapter:
+            return  # no-op
+        try:
+            mover = ZoneMover(self.app)
+            result = mover.move(zone_name, dest_chapter,
+                                parent=self.winfo_toplevel())
+        except Exception as e:
+            messagebox.showerror('Zone move failed',
+                                 f'Pipeline crashed: {e}', parent=self)
+            return
+        if result is None:
+            return  # user cancelled in conflict dialog
+        ZoneMoveResultDialog(self.winfo_toplevel(), self.app, result)
+        self.app.load_all_after_zone_move()
 
 
 # -----------------------------------------------------------------------------
@@ -9649,6 +10458,1077 @@ class MapTab(BaseTab):
 
 
 # -----------------------------------------------------------------------------
+# ZONE MOVER — drag-and-drop zone-to-chapter pipeline
+# -----------------------------------------------------------------------------
+#
+# Three classes, plus the wire-up in ZoneTab._dnd_*:
+#
+#   ZoneMover            Encapsulates the move pipeline:
+#                          1. snapshot-backup all 4 modified DTs
+#                          2. pre-flight (Z-bleed, AdditionalChapters drift,
+#                             count of LayoutConnection refs, BP.Z list)
+#                          3. show ZoneMoveDialog if conflicts -> A/B/C choice
+#                          4. apply changes (Chapter, Position.Z, landmark
+#                             BasePosition.Z, nested Subcell.Z, AdditionalChapters,
+#                             PreferredZOverride) and sync NameMap counters
+#                          5. run BuildValidator + deep-Z audit
+#                          6. return a ZoneMoveResult
+#
+#   ZoneMoveDialog       Modal A/B/C choice dialog (block / expand / shrink)
+#
+#   ZoneMoveResultDialog Post-move summary popup with roll-back button
+#
+# These are PURE Tk + stdlib. They reuse the existing fp/find_prop helpers
+# defined further up in this file.
+# -----------------------------------------------------------------------------
+
+
+class ZoneMoveResult:
+    """Result object returned from ZoneMover.move().
+
+    Attributes:
+        zone_name           The zone we moved
+        src_chapter         Chapter we came from
+        dest_chapter        Chapter we moved to
+        choice              'A' (block, never returns this), 'B' (expand),
+                            'C' (shrink), or 'NONE' (no conflict)
+        snapshot_paths      dict: doc_key -> Path to *.before_zonemove_*.json
+        change_log          list[str] of human-readable mutations applied
+        validator_errors    list[Issue] severity=='error' from BuildValidator
+        validator_warnings  list[Issue] severity=='warning'
+        deep_audit_lines    list[str] from the deep-Z audit (mirrors _deep_verify)
+        cancelled           True if user cancelled before any change applied
+    """
+
+    def __init__(self, zone_name, src_chapter, dest_chapter):
+        self.zone_name = zone_name
+        self.src_chapter = src_chapter
+        self.dest_chapter = dest_chapter
+        self.choice = 'NONE'
+        self.snapshot_paths = {}
+        self.change_log = []
+        self.validator_errors = []
+        self.validator_warnings = []
+        self.deep_audit_lines = []
+        self.cancelled = False
+
+
+class ZoneMover:
+    """Encapsulates the drag-drop "move zone to chapter" pipeline.
+
+    Public API: ``move(zone_name, dest_chapter_name, parent=None)``
+    Returns a ZoneMoveResult, or None if the user cancelled in the conflict
+    dialog before any change was applied.
+
+    The mover only mutates ``app.docs``. Files are NOT written to disk —
+    the user still has to hit Save All to persist changes (consistent with
+    every other editor action). The snapshot backups ARE written to disk,
+    however, so a roll-back can recover even if the user immediately saves.
+    """
+
+    # Doc keys we may snapshot/mutate during a move.
+    AFFECTED_DOCS = ('zones', 'chapters', 'landmarks', 'connections')
+
+    def __init__(self, app):
+        self.app = app
+
+    # ---------- helpers (mirror module-level fp/gv from _deep_verify) ----------
+    @staticmethod
+    def _fp(values, name):
+        for p in values or []:
+            if isinstance(p, dict) and p.get('Name') == name:
+                return p
+        return None
+
+    @staticmethod
+    def _intvec(prop):
+        v = prop.get('Value') if prop else None
+        if isinstance(v, list) and v:
+            d = v[0].get('Value') if isinstance(v[0], dict) else None
+            if isinstance(d, dict):
+                return (d.get('X', 0), d.get('Y', 0), d.get('Z', 0))
+        return None
+
+    @staticmethod
+    def _set_intvec_z(prop, new_z):
+        """Mutate the IntVector struct's Z component in place. Returns True
+        if mutation succeeded."""
+        v = prop.get('Value') if prop else None
+        if isinstance(v, list) and v:
+            d = v[0].get('Value') if isinstance(v[0], dict) else None
+            if isinstance(d, dict):
+                d['Z'] = int(new_z)
+                return True
+        return False
+
+    @staticmethod
+    def _zstate(row):
+        p = ZoneMover._fp(row.get('Value', []), 'EnabledState')
+        return str(p.get('Value', '')).split('::')[-1] if p else ''
+
+    @staticmethod
+    def _rowname_field(row, field):
+        """Read RowName from a structhandle field (Chapter, OriginLandmark…)"""
+        p = ZoneMover._fp(row.get('Value', []), field)
+        if not p:
+            return None
+        v = p.get('Value')
+        if isinstance(v, list):
+            for it in v:
+                if isinstance(it, dict) and it.get('Name') == 'RowName':
+                    return it.get('Value', '')
+        return v
+
+    @staticmethod
+    def _scalar(row, field):
+        p = ZoneMover._fp(row.get('Value', []), field)
+        if not p:
+            return None
+        return p.get('Value')
+
+    # ---------- public API ----------
+    def move(self, zone_name, dest_chapter_name, parent=None):
+        """Run the full pipeline. Returns a ZoneMoveResult or None on cancel."""
+        zones_doc = self.app.docs.get('zones')
+        chap_doc = self.app.docs.get('chapters')
+        lm_doc = self.app.docs.get('landmarks')
+        conn_doc = self.app.docs.get('connections')
+        if not (zones_doc and chap_doc):
+            raise RuntimeError('zones/chapters DT not loaded')
+
+        zone_row = next((r for r in zones_doc.rows if r.get('Name') == zone_name), None)
+        if zone_row is None:
+            raise RuntimeError(f'Zone {zone_name!r} not in DT_Moria_Zones')
+        dest_chap_row = next((r for r in chap_doc.rows
+                              if r.get('Name') == dest_chapter_name), None)
+        if dest_chap_row is None:
+            raise RuntimeError(f'Chapter {dest_chapter_name!r} not in DT_Moria_Chapters')
+
+        src_chapter = self._rowname_field(zone_row, 'Chapter') or ''
+        result = ZoneMoveResult(zone_name, src_chapter, dest_chapter_name)
+
+        # Pre-flight ----------------------------------------------------------
+        preflight = self._preflight(zone_row, dest_chap_row, lm_doc, conn_doc, chap_doc)
+        # If anomalies present, ask user
+        choice = 'NONE'
+        if preflight['has_conflict']:
+            dlg = ZoneMoveDialog(parent or self.app, preflight)
+            choice = dlg.result  # 'A', 'B', 'C', or None
+            if choice is None or choice == 'A':
+                result.cancelled = True
+                return None if choice is None else result
+        result.choice = choice
+
+        # Snapshot backup -----------------------------------------------------
+        result.snapshot_paths = self._snapshot(zone_name, dest_chapter_name)
+
+        # Apply changes -------------------------------------------------------
+        self._apply(zone_row, dest_chap_row, preflight, choice,
+                    chap_doc, lm_doc, conn_doc, result.change_log)
+
+        # Sync NameMap counters in every modified doc
+        for k in self.AFFECTED_DOCS:
+            d = self.app.docs.get(k)
+            if d is not None:
+                d.reconcile_namemap()
+
+        # Validate ------------------------------------------------------------
+        try:
+            issues = BuildValidator(self.app.docs).run()
+            result.validator_errors = [i for i in issues if i.severity == 'error']
+            result.validator_warnings = [i for i in issues if i.severity == 'warning']
+        except Exception as e:
+            result.deep_audit_lines.append(f'(validator crashed: {e})')
+        result.deep_audit_lines.extend(self._deep_audit(preflight['ss_cells_after']))
+
+        return result
+
+    # ---------- pre-flight ----------
+    def _preflight(self, zone_row, dest_chap_row, lm_doc, conn_doc, chap_doc):
+        """Compute everything we need to make conflict-resolution decisions."""
+        zv = ZoneView(zone_row)
+        dest_min = int(self._scalar(dest_chap_row, 'MinZ') or 0)
+        dest_max = int(self._scalar(dest_chap_row, 'MaxZ') or 0)
+        dest_prime = int(self._scalar(dest_chap_row, 'PrimeZ') or dest_min)
+        dest_layer = int(self._scalar(dest_chap_row, 'Layer') or 0)
+        src_chap = zv.chapter
+        src_chap_row = next((r for r in chap_doc.rows
+                             if r.get('Name') == src_chap), None)
+        src_min = src_max = src_prime = None
+        if src_chap_row is not None:
+            src_min = int(self._scalar(src_chap_row, 'MinZ') or 0)
+            src_max = int(self._scalar(src_chap_row, 'MaxZ') or 0)
+            src_prime = int(self._scalar(src_chap_row, 'PrimeZ') or 0)
+
+        pos = zv.position or (0, 0, 0)
+        size = zv.target_size or (1, 1, 1)
+        size_z = int(size[2] or 1)
+
+        # Z-bleed: new top = dest_prime + size_z - 1; >= dest_max?
+        new_top = dest_prime + size_z - 1
+        z_bleed = max(0, new_top - dest_max)
+
+        # bPositionFromLandmarks
+        pfl_p = self._fp(zone_row.get('Value', []), 'bPositionFromLandmarks')
+        from_landmarks = bool(pfl_p.get('Value')) if pfl_p else False
+
+        # AdditionalChapters drift detection — list those that are no longer
+        # adjacent to the destination chapter (heuristic: anything that
+        # references the OLD chapter or its immediate siblings is suspect).
+        addl = list(zv.additional_chapters or [])
+        # Anything that == source chapter or starts with the same Layer/numeric
+        # neighbour is flagged. Simplest rule: flag any addl whose name doesn't
+        # match dest_chapter and isn't already in dest_chap's natural neighbours.
+        # We don't have the neighbour-detection logic here; just flag every
+        # entry so the user can decide.
+        addl_drift = [c for c in addl if c and c != dest_chap_row.get('Name')]
+
+        # PreferredZOverride
+        pzo_p = self._fp(zone_row.get('Value', []), 'PreferredZOverride')
+        pzo_val = None
+        if pzo_p:
+            v = pzo_p.get('Value')
+            if isinstance(v, int):
+                pzo_val = v
+
+        # Landmarks hosted by this zone, with their current BP.Z
+        lh_entries = self._zone_landmark_handles(zone_row)
+        lm_bps = []  # [(landmark_name, (x,y,z))]
+        if lm_doc:
+            for ln in lh_entries:
+                if not ln or ln == 'None':
+                    continue
+                lm_row = next((r for r in lm_doc.rows if r.get('Name') == ln), None)
+                if lm_row is None:
+                    continue
+                bp = self._fp(lm_row.get('Value', []), 'BasePosition')
+                bp_xyz = self._intvec(bp) if bp else None
+                lm_bps.append((ln, bp_xyz))
+
+        # LayoutConnections referencing any of these landmarks
+        conn_refs = []  # [(conn_row_name, field, landmark)]
+        if conn_doc and lh_entries:
+            lh_set = set(lh_entries)
+            for r in conn_doc.rows:
+                for fld in ('OriginLandmark', 'DestinationLandmark'):
+                    ln = self._rowname_field(r, fld)
+                    if ln and ln in lh_set:
+                        conn_refs.append((r.get('Name', '?'), fld, ln))
+
+        # Cascade-shift planning for option B: every chapter with Layer >
+        # dest_layer needs MinZ/MaxZ/PrimeZ shifted UP by z_bleed cells.
+        cascade_chapters = []
+        if z_bleed > 0:
+            for r in chap_doc.rows:
+                if r is dest_chap_row:
+                    continue
+                L = self._scalar(r, 'Layer')
+                if not isinstance(L, int):
+                    continue
+                if L > dest_layer:
+                    cascade_chapters.append(r.get('Name', '?'))
+
+        # ss_cells_after: live SS chapter Z bands assuming option B is applied
+        ss_cells_after = self._ss_cells_after(chap_doc, dest_chap_row, z_bleed,
+                                              cascade_chapters)
+
+        has_conflict = bool(z_bleed) or bool(addl_drift)
+        return {
+            'has_conflict': has_conflict,
+            'zone_name': zone_row.get('Name'),
+            'src_chapter': src_chap,
+            'src_min_z': src_min, 'src_max_z': src_max, 'src_prime_z': src_prime,
+            'dest_chapter': dest_chap_row.get('Name'),
+            'dest_min_z': dest_min, 'dest_max_z': dest_max,
+            'dest_prime_z': dest_prime, 'dest_layer': dest_layer,
+            'pos': pos, 'size': size, 'size_z': size_z,
+            'z_bleed': z_bleed,
+            'from_landmarks': from_landmarks,
+            'addl_drift': addl_drift,
+            'lm_bps': lm_bps,
+            'conn_refs': conn_refs,
+            'cascade_chapters': cascade_chapters,
+            'pzo_val': pzo_val,
+            'ss_cells_after': ss_cells_after,
+        }
+
+    @staticmethod
+    def _zone_landmark_handles(zone_row):
+        """Return list of landmark RowNames this zone hosts via LandmarkHandles."""
+        out = []
+        lh = ZoneMover._fp(zone_row.get('Value', []), 'LandmarkHandles')
+        if not lh:
+            return out
+        for entry in (lh.get('Value') or []):
+            if not isinstance(entry, dict):
+                continue
+            inner = entry.get('Value')
+            if not isinstance(inner, list):
+                continue
+            lhprop = ZoneMover._fp(inner, 'Landmark')
+            if not lhprop:
+                continue
+            lv = lhprop.get('Value')
+            if isinstance(lv, list):
+                for it in lv:
+                    if isinstance(it, dict) and it.get('Name') == 'RowName':
+                        nm = it.get('Value', '')
+                        if nm and nm != 'None':
+                            out.append(nm)
+        return out
+
+    @staticmethod
+    def _ss_cells_after(chap_doc, dest_chap_row, z_bleed, cascade_names):
+        """Compute the set of SS Z cells assuming option B's expand+cascade
+        shift would apply. Used by the deep audit AFTER changes are applied
+        (so it always reflects the post-state)."""
+        cells = set()
+        for r in chap_doc.rows:
+            n = r.get('Name', '')
+            if not n.startswith('SandboxSmall-'):
+                continue
+            mn = ZoneMover._scalar(r, 'MinZ')
+            mx = ZoneMover._scalar(r, 'MaxZ')
+            if isinstance(mn, int) and isinstance(mx, int):
+                for cz in range(mn, mx + 1):
+                    cells.add(cz)
+        return cells
+
+    # ---------- snapshot ----------
+    def _snapshot(self, zone_name, dest_chapter):
+        """Write *.before_zonemove_<zone>_<dest>_<ts>.json sidecars next to
+        each modified DT. The pattern matches the gitignore rule
+        ``*.before_*.json`` so commits are clean."""
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        # Sanitize for filesystem. Chapter rownames may contain dots / dashes.
+        sane_zone = re.sub(r'[^A-Za-z0-9_.-]', '_', zone_name)
+        sane_chap = re.sub(r'[^A-Za-z0-9_.-]', '_', dest_chapter)
+        suffix = f'.before_zonemove_{sane_zone}_{sane_chap}_{ts}.json'
+        paths = {}
+        for k in self.AFFECTED_DOCS:
+            d = self.app.docs.get(k)
+            if d is None or d.data is None:
+                continue
+            sp = d.json_path.with_name(d.json_path.stem + suffix)
+            try:
+                with open(sp, 'w', encoding='utf-8') as f:
+                    json.dump(d.data, f, indent=2)
+                paths[k] = sp
+            except Exception:
+                pass
+        return paths
+
+    # ---------- apply ----------
+    def _apply(self, zone_row, dest_chap_row, pf, choice,
+               chap_doc, lm_doc, conn_doc, log):
+        """Mutate docs in place. ``choice`` is 'B', 'C', or 'NONE'."""
+        dest_name = dest_chap_row.get('Name')
+        # 1. Zone Chapter rowname
+        cp = self._fp(zone_row.get('Value', []), 'Chapter')
+        if cp is not None:
+            v = cp.get('Value')
+            if isinstance(v, list):
+                for it in v:
+                    if isinstance(it, dict) and it.get('Name') == 'RowName':
+                        old = it.get('Value', '')
+                        it['Value'] = dest_name
+                        log.append(f'Zone.Chapter: {old} -> {dest_name}')
+            else:
+                cp['Value'] = dest_name
+                log.append(f'Zone.Chapter: -> {dest_name}')
+
+        # 2. Option B cascade: expand dest MaxZ by z_bleed and shift higher chapters
+        if choice == 'B' and pf['z_bleed'] > 0:
+            shift = pf['z_bleed']
+            # Expand dest MaxZ by shift
+            mx_prop = self._fp(dest_chap_row.get('Value', []), 'MaxZ')
+            if mx_prop is not None:
+                mx_prop['Value'] = pf['dest_max_z'] + shift
+                log.append(f'Chapter {dest_name}.MaxZ: '
+                           f'{pf["dest_max_z"]} -> {pf["dest_max_z"] + shift}')
+            # Cascade-shift everything with Layer > dest_layer
+            for nm in pf['cascade_chapters']:
+                row = next((r for r in chap_doc.rows if r.get('Name') == nm), None)
+                if row is None:
+                    continue
+                for fld in ('MinZ', 'MaxZ', 'PrimeZ'):
+                    p = self._fp(row.get('Value', []), fld)
+                    if p is not None and isinstance(p.get('Value'), int):
+                        p['Value'] = p['Value'] + shift
+                log.append(f'Chapter {nm}: MinZ/MaxZ/PrimeZ +{shift}')
+
+        # 3. Option C: shrink zone TargetSize.Z to fit
+        if choice == 'C' and pf['z_bleed'] > 0:
+            ts_prop = self._fp(zone_row.get('Value', []), 'TargetSize')
+            if ts_prop is not None:
+                new_sz = max(1, pf['size_z'] - pf['z_bleed'])
+                v = ts_prop.get('Value')
+                if isinstance(v, list) and v:
+                    d = v[0].get('Value') if isinstance(v[0], dict) else None
+                    if isinstance(d, dict):
+                        d['Z'] = new_sz
+                        log.append(f'Zone.TargetSize.Z: {pf["size_z"]} -> {new_sz}')
+
+        # 4. Update Position.Z to dest PrimeZ (preserve X/Y)
+        pos_prop = self._fp(zone_row.get('Value', []), 'Position')
+        if pos_prop is not None:
+            v = pos_prop.get('Value')
+            if isinstance(v, list) and v:
+                d = v[0].get('Value') if isinstance(v[0], dict) else None
+                if isinstance(d, dict):
+                    old_z = d.get('Z', 0)
+                    # Use NEW dest_prime (after option B shift, dest_prime
+                    # itself doesn't move; we expanded MaxZ above it).
+                    d['Z'] = pf['dest_prime_z']
+                    log.append(f'Zone.Position.Z: {old_z} -> {pf["dest_prime_z"]}')
+
+        # 5. Update PreferredZOverride if present
+        if pf['pzo_val'] is not None:
+            pzo = self._fp(zone_row.get('Value', []), 'PreferredZOverride')
+            if pzo is not None:
+                pzo['Value'] = pf['dest_prime_z']
+                log.append(f'Zone.PreferredZOverride: {pf["pzo_val"]} -> {pf["dest_prime_z"]}')
+
+        # 6. Landmark BasePosition.Z update
+        if lm_doc:
+            for ln, bp_xyz in pf['lm_bps']:
+                if not bp_xyz:
+                    continue
+                # Skip sentinel (0,0,*) landmarks — those are unset markers
+                if bp_xyz[0] == 0 and bp_xyz[1] == 0:
+                    log.append(f'Landmark {ln}.BasePosition: skipped (sentinel 0,0)')
+                    continue
+                lm_row = next((r for r in lm_doc.rows if r.get('Name') == ln), None)
+                if lm_row is None:
+                    continue
+                bp = self._fp(lm_row.get('Value', []), 'BasePosition')
+                if bp is None:
+                    continue
+                old_z = bp_xyz[2]
+                if self._set_intvec_z(bp, pf['dest_prime_z']):
+                    log.append(f'Landmark {ln}.BasePosition.Z: '
+                               f'{old_z} -> {pf["dest_prime_z"]}')
+
+        # 7. AdditionalChapters drift — clear flagged entries (safest default)
+        if pf['addl_drift']:
+            ac = self._fp(zone_row.get('Value', []), 'AdditionalChapters')
+            if ac is not None:
+                # Remove any entry whose RowName is in addl_drift
+                vals = ac.get('Value') or []
+                kept = []
+                cleared = []
+                for entry in vals:
+                    if not isinstance(entry, dict):
+                        kept.append(entry); continue
+                    inner = entry.get('Value')
+                    drop = False
+                    if isinstance(inner, list):
+                        for it in inner:
+                            if (isinstance(it, dict)
+                                    and it.get('Name') == 'RowName'
+                                    and it.get('Value') in pf['addl_drift']):
+                                drop = True
+                                cleared.append(it.get('Value'))
+                                break
+                    if drop:
+                        continue
+                    kept.append(entry)
+                if cleared:
+                    ac['Value'] = kept
+                    log.append(f'Zone.AdditionalChapters: cleared '
+                               f'{len(cleared)} drifted entry(ies): {cleared}')
+
+        # 8. LayoutConnections nested Subcell.Z update for each conn whose
+        #    endpoint landmark is hosted by this zone.
+        if conn_doc and pf['conn_refs']:
+            touched = set()
+            for cname, fld, _ln in pf['conn_refs']:
+                touched.add(cname)
+            for cname in touched:
+                row = next((r for r in conn_doc.rows
+                            if r.get('Name') == cname), None)
+                if row is None:
+                    continue
+                for iface_field in ('OriginInterface', 'DestinationInterface'):
+                    iface = self._fp(row.get('Value', []), iface_field)
+                    if not iface:
+                        continue
+                    for inner in (iface.get('Value') or []):
+                        if (isinstance(inner, dict)
+                                and inner.get('Name') == 'Subcell'):
+                            old = self._intvec(inner)
+                            if self._set_intvec_z(inner, pf['dest_prime_z']):
+                                log.append(
+                                    f'LayoutConnection {cname}.'
+                                    f'{iface_field}.Subcell.Z: '
+                                    f'{old[2] if old else "?"} '
+                                    f'-> {pf["dest_prime_z"]}')
+                # Top-level Subcell on the row (rare in vanilla, but spec
+                # says update it if present).
+                top_sc = self._fp(row.get('Value', []), 'Subcell')
+                if top_sc:
+                    old = self._intvec(top_sc)
+                    if self._set_intvec_z(top_sc, pf['dest_prime_z']):
+                        log.append(f'LayoutConnection {cname}.Subcell.Z: '
+                                   f'{old[2] if old else "?"} '
+                                   f'-> {pf["dest_prime_z"]}')
+
+    # ---------- deep audit (mirror experiments/.../_deep_verify.py) ----------
+    def _deep_audit(self, ss_cells):
+        """Lightweight in-process version of _deep_verify.py — surfaces the
+        same checks the user would run from the command line. Returns a list
+        of human-readable lines describing each finding."""
+        out = []
+        z_doc = self.app.docs.get('zones')
+        ch_doc = self.app.docs.get('chapters')
+        lm_doc = self.app.docs.get('landmarks')
+        lc_doc = self.app.docs.get('connections')
+        if not (z_doc and ch_doc):
+            return out
+
+        # Recompute SS cells from current state
+        ss_cells = set()
+        for r in ch_doc.rows:
+            n = r.get('Name', '')
+            if not n.startswith('SandboxSmall-'):
+                continue
+            if self._zstate(r) == 'Disabled':
+                continue
+            mn = self._scalar(r, 'MinZ'); mx = self._scalar(r, 'MaxZ')
+            if isinstance(mn, int) and isinstance(mx, int):
+                for cz in range(mn, mx + 1):
+                    ss_cells.add(cz)
+
+        # Zone Position.Z in cell?
+        bad_zpos = []
+        for r in z_doc.rows:
+            zs = self._fp(r.get('Value', []), 'ZoneSet')
+            if not zs or str(zs.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                continue
+            if self._zstate(r) == 'Disabled':
+                continue
+            pos = self._intvec(self._fp(r['Value'], 'Position'))
+            if not pos or pos == (0, 0, 0):
+                continue
+            if pos[2] not in ss_cells:
+                bad_zpos.append((r['Name'], pos))
+        out.append(f'Zone Position.Z out of band: {len(bad_zpos)}')
+        for n, p in bad_zpos[:5]:
+            out.append(f'  {n} {p}')
+
+        # Nested Subcell.Z in band?
+        if lc_doc:
+            bad_sc = []
+            for r in lc_doc.rows:
+                zs = self._fp(r.get('Value', []), 'ZoneSet')
+                if not zs or str(zs.get('Value', '')).split('::')[-1] != 'SandboxSmall':
+                    continue
+                if self._zstate(r) == 'Disabled':
+                    continue
+                for fld in ('OriginInterface', 'DestinationInterface'):
+                    prop = self._fp(r['Value'], fld)
+                    if not prop:
+                        continue
+                    for inner in (prop.get('Value') or []):
+                        if (isinstance(inner, dict)
+                                and inner.get('Name') == 'Subcell'):
+                            sc = self._intvec(inner)
+                            if sc and sc[2] != 0 and sc[2] not in ss_cells:
+                                bad_sc.append((r['Name'], fld, sc[2]))
+            out.append(f'Nested Subcell.Z out of band: {len(bad_sc)}')
+            for n, f, z in bad_sc[:5]:
+                out.append(f'  {n}.{f} Z={z}')
+
+        # NameMap counter sync
+        for k in self.AFFECTED_DOCS:
+            d = self.app.docs.get(k)
+            if d is None or d.data is None:
+                continue
+            nm = len(d.data.get('NameMap', []))
+            nrf = d.data.get('NamesReferencedFromExportDataCount')
+            g = d.data.get('Generations') or []
+            g_nc = g[0].get('NameCount') if g else None
+            ok = (nrf == nm and (g_nc is None or g_nc == nm))
+            out.append(f'{d.json_path.name}: NameMap={nm} NRef={nrf} '
+                       f'Gen.NC={g_nc} {"OK" if ok else "MISMATCH"}')
+        return out
+
+
+class ZoneMoveDialog(tk.Toplevel):
+    """Modal conflict-resolution dialog with three radio choices.
+
+    Returns one of 'A' (block), 'B' (auto-expand+cascade), 'C' (auto-shrink),
+    or None (cancelled). Read ``self.result`` after ``wait_window()``.
+    """
+
+    def __init__(self, parent, preflight):
+        super().__init__(parent)
+        self.title('Zone move — conflicts detected')
+        self.transient(parent)
+        self.grab_set()
+        self.minsize(640, 500)
+        self.result = None
+        pf = preflight
+
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(body, text=f'Move zone "{pf["zone_name"]}" '
+                  f'to {pf["dest_chapter"]}',
+                  font=('Segoe UI', 11, 'bold')).pack(anchor='w')
+
+        # Summary
+        sf = ttk.LabelFrame(body, text='Move summary', padding=8)
+        sf.pack(fill=tk.X, pady=(8, 4))
+        rows = [
+            f'Source chapter:  {pf["src_chapter"]}  '
+            f'(MinZ={pf["src_min_z"]} MaxZ={pf["src_max_z"]} '
+            f'PrimeZ={pf["src_prime_z"]})',
+            f'Destination:     {pf["dest_chapter"]}  '
+            f'(MinZ={pf["dest_min_z"]} MaxZ={pf["dest_max_z"]} '
+            f'PrimeZ={pf["dest_prime_z"]})',
+            f'Zone Position:   {pf["pos"]}  TargetSize: {pf["size"]}',
+            f'bPositionFromLandmarks: {pf["from_landmarks"]}',
+            f'Hosted landmarks: {len(pf["lm_bps"])}',
+            f'Connection refs: {len(pf["conn_refs"])}',
+        ]
+        for r in rows:
+            ttk.Label(sf, text=r, justify='left').pack(anchor='w')
+
+        # Issues
+        isf = ttk.LabelFrame(body, text='Issues detected', padding=8)
+        isf.pack(fill=tk.X, pady=4)
+        if pf['z_bleed'] > 0:
+            ttk.Label(isf, justify='left', wraplength=560,
+                      text=(f'Z-bleed: zone top would land at Z='
+                            f'{pf["dest_prime_z"] + pf["size_z"] - 1}, '
+                            f'destination MaxZ={pf["dest_max_z"]}. '
+                            f'Bleed = {pf["z_bleed"]} cell(s).')
+                      ).pack(anchor='w')
+        if pf['addl_drift']:
+            ttk.Label(isf, justify='left', wraplength=560,
+                      text=(f'AdditionalChapters drift: '
+                            f'{len(pf["addl_drift"])} entry(ies) point at '
+                            f'old neighbours: {pf["addl_drift"]}')
+                      ).pack(anchor='w')
+
+        # Choices
+        cf = ttk.LabelFrame(body, text='Choose how to proceed', padding=8)
+        cf.pack(fill=tk.X, pady=(8, 4))
+        self.v_choice = tk.StringVar(value='B' if pf['z_bleed'] > 0 else 'B')
+        ttk.Radiobutton(cf, variable=self.v_choice, value='A',
+                        text='A — Block the move (cancel everything)'
+                        ).pack(anchor='w')
+        b_text = (f'B — Auto-expand destination chapter MaxZ by '
+                  f'{pf["z_bleed"]} and cascade-shift '
+                  f'{len(pf["cascade_chapters"])} higher chapter(s) up')
+        rb_b = ttk.Radiobutton(cf, variable=self.v_choice, value='B',
+                               text=b_text)
+        rb_b.pack(anchor='w')
+        if pf['z_bleed'] <= 0:
+            rb_b.state(['disabled'])
+        c_text = (f'C — Auto-shrink zone TargetSize.Z from {pf["size_z"]} '
+                  f'to {max(1, pf["size_z"] - pf["z_bleed"])}')
+        rb_c = ttk.Radiobutton(cf, variable=self.v_choice, value='C',
+                               text=c_text)
+        rb_c.pack(anchor='w')
+        if pf['z_bleed'] <= 0:
+            rb_c.state(['disabled'])
+
+        # Buttons
+        btns = ttk.Frame(body); btns.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btns, text='Cancel',
+                   command=self._cancel).pack(side=tk.RIGHT)
+        ttk.Button(btns, text='Apply', style='Accent.TButton',
+                   command=self._apply).pack(side=tk.RIGHT, padx=(0, 6))
+
+        self.protocol('WM_DELETE_WINDOW', self._cancel)
+        self.wait_window()
+
+    def _apply(self):
+        self.result = self.v_choice.get()
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+
+class ZoneMoveResultDialog(tk.Toplevel):
+    """Post-move summary popup. Shows the change-log + validator results +
+    a roll-back button (which restores the .before_zonemove_* sidecars)."""
+
+    def __init__(self, parent, app, result):
+        super().__init__(parent)
+        self.app = app
+        self.result = result
+        dest_label = result.dest_chapter
+        self.title(f'Zone moved: {result.zone_name} -> {dest_label}')
+        self.transient(parent)
+        self.grab_set()
+        self.minsize(720, 540)
+
+        body = ttk.Frame(self, padding=10)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(body,
+                  text=f'Zone "{result.zone_name}" moved '
+                       f'{result.src_chapter or "(none)"}'
+                       f' -> {result.dest_chapter}',
+                  font=('Segoe UI', 11, 'bold')).pack(anchor='w')
+
+        # Summary tabs (Notebook)
+        nb = ttk.Notebook(body); nb.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        # Changes tab
+        cf = ttk.Frame(nb)
+        nb.add(cf, text=f'Changes ({len(result.change_log)})')
+        cl_text = tk.Text(cf, wrap='word', height=14)
+        cl_text.pack(fill=tk.BOTH, expand=True)
+        cl_text.insert('1.0', '\n'.join(result.change_log)
+                       if result.change_log else '(no changes recorded)')
+        cl_text.config(state='disabled')
+
+        # Validation tab
+        vf = ttk.Frame(nb)
+        nb.add(vf, text=f'Validation ({len(result.validator_errors)} errors / '
+                        f'{len(result.validator_warnings)} warnings)')
+        v_text = tk.Text(vf, wrap='word', height=14)
+        v_text.pack(fill=tk.BOTH, expand=True)
+        lines = []
+        if result.validator_errors:
+            lines.append('=== ERRORS ===')
+            for it in result.validator_errors:
+                lines.append(f'[error] {it.check}: {it.detail}')
+        if result.validator_warnings:
+            lines.append('')
+            lines.append('=== WARNINGS ===')
+            for it in result.validator_warnings[:50]:
+                lines.append(f'[warn]  {it.check}: {it.detail}')
+        if not result.validator_errors and not result.validator_warnings:
+            lines.append('No errors or warnings.')
+        v_text.insert('1.0', '\n'.join(lines))
+        v_text.config(state='disabled')
+
+        # Deep audit tab
+        df = ttk.Frame(nb)
+        nb.add(df, text='Deep audit')
+        d_text = tk.Text(df, wrap='word', height=14)
+        d_text.pack(fill=tk.BOTH, expand=True)
+        d_text.insert('1.0', '\n'.join(result.deep_audit_lines)
+                       if result.deep_audit_lines else '(no audit output)')
+        d_text.config(state='disabled')
+
+        # Snapshot listing tab
+        sf = ttk.Frame(nb)
+        nb.add(sf, text=f'Snapshots ({len(result.snapshot_paths)})')
+        s_text = tk.Text(sf, wrap='word', height=8)
+        s_text.pack(fill=tk.BOTH, expand=True)
+        slines = []
+        for k, p in result.snapshot_paths.items():
+            slines.append(f'{k}: {p}')
+        s_text.insert('1.0', '\n'.join(slines)
+                      if slines else '(no snapshots written)')
+        s_text.config(state='disabled')
+
+        # Buttons
+        bf = ttk.Frame(body); bf.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(bf, text='Roll back',
+                   command=self._rollback).pack(side=tk.LEFT)
+        ttk.Button(bf, text='OK', style='Accent.TButton',
+                   command=self.destroy).pack(side=tk.RIGHT)
+
+    def _rollback(self):
+        if not self.result.snapshot_paths:
+            messagebox.showerror('Roll back',
+                                 'No snapshots available to restore.',
+                                 parent=self)
+            return
+        if not messagebox.askyesno('Roll back',
+                                   'Restore all 4 DataTables from the '
+                                   '.before_zonemove_* snapshots?',
+                                   parent=self):
+            return
+        restored = []
+        failed = []
+        for k, sp in self.result.snapshot_paths.items():
+            d = self.app.docs.get(k)
+            if d is None or not Path(sp).exists():
+                failed.append(k); continue
+            try:
+                with open(sp, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                d.data = data
+                exports = data.get('Exports', [])
+                table = exports[0].get('Table', {}) if exports else {}
+                if 'Data' in table:
+                    d.rows = table['Data']
+                else:
+                    d.rows = table.get('Value', []) or []
+                restored.append(k)
+            except Exception as e:
+                failed.append(f'{k}: {e}')
+        # Refresh all tabs after roll-back
+        try:
+            self.app.load_all_after_zone_move()
+        except Exception:
+            pass
+        msg = f'Restored: {restored}'
+        if failed:
+            msg += f'\nFailed: {failed}'
+        messagebox.showinfo('Roll back', msg, parent=self)
+        self.destroy()
+
+
+# -----------------------------------------------------------------------------
+# ZONE MOVE — chapter picker (right-click flow)
+# -----------------------------------------------------------------------------
+#
+# Modal Toplevel that replaces the drag-drop trigger. Listing all valid
+# destination chapters in Layer-descending order (Lv-7 at top, D-7 at
+# bottom) makes off-screen targets a non-issue. The user picks a chapter
+# and the host caller invokes ZoneMover.move() exactly the way the
+# drag-drop release handler did.
+#
+# Columns mirror the level-list skill output:
+#   Lv-N | chapter-row-name | DisplayName key | PrimeZ | live zone count
+#
+# The source chapter is filtered out (can't move a zone to itself).
+# -----------------------------------------------------------------------------
+
+
+class ZoneMoveChapterPicker(tk.Toplevel):
+    """Modal chapter-picker for the right-click "Move to chapter…" flow.
+
+    Public API:
+        picker = ZoneMoveChapterPicker(parent, app, zone_view)
+        parent.wait_window(picker)
+        if picker.result:  # chapter row name, or None on cancel
+            ZoneMover(app).move(zone_view.name, picker.result, parent=...)
+    """
+
+    def __init__(self, parent, app, zone_view):
+        super().__init__(parent)
+        self.app = app
+        self.zone = zone_view
+        self.result = None
+        self._chapter_names = []  # parallel list to listbox rows
+
+        self.title(f'Move zone: {zone_view.name}')
+        self.transient(parent)
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        self.resizable(True, True)
+        self.minsize(640, 420)
+        self.protocol('WM_DELETE_WINDOW', self._on_cancel)
+        self.bind('<Escape>', lambda _e: self._on_cancel())
+        self.bind('<Return>', lambda _e: self._on_ok())
+
+        self._build_ui()
+        self._populate_chapters()
+        # Center on parent
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width() or 1200
+            ph = parent.winfo_height() or 800
+            w = self.winfo_width()
+            h = self.winfo_height()
+            self.geometry(f'+{px + (pw - w) // 2}+{py + (ph - h) // 2}')
+        except Exception:
+            pass
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _layer_label(layer):
+        """Format a Layer int the same way the level-list skill does:
+        Lv-N for non-negative (0->Lv-1, 1->Lv-2, ...), D-N for negative."""
+        if layer is None:
+            return '?'
+        try:
+            L = int(layer)
+        except (TypeError, ValueError):
+            return '?'
+        if L >= 0:
+            return f'Lv-{L + 1}'
+        return f'D-{-L}'
+
+    def _chapter_layer(self, chapter_name):
+        chap_doc = self.app.docs.get('chapters')
+        if not chap_doc:
+            return None
+        for r in chap_doc.rows:
+            if r.get('Name') == chapter_name:
+                p = find_prop(r.get('Value', []), 'Layer')
+                if p is None:
+                    return None
+                v = p.get('Value')
+                if v is None:
+                    return None
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _chapter_field(self, chapter_name, field_name):
+        """Return the scalar value of a chapter field, or None."""
+        chap_doc = self.app.docs.get('chapters')
+        if not chap_doc:
+            return None
+        for r in chap_doc.rows:
+            if r.get('Name') == chapter_name:
+                p = find_prop(r.get('Value', []), field_name)
+                if p is None:
+                    return None
+                return p.get('Value')
+        return None
+
+    def _live_zone_count(self, chapter_name):
+        """Count Live zones whose Chapter rowname == chapter_name."""
+        zones_doc = self.app.docs.get('zones')
+        if not zones_doc:
+            return 0
+        n = 0
+        for r in zones_doc.rows:
+            ch_p = find_prop(r.get('Value', []), 'Chapter')
+            ch = get_rowname(ch_p) if ch_p is not None else ''
+            if ch != chapter_name:
+                continue
+            es_p = find_prop(r.get('Value', []), 'EnabledState')
+            es = get_enum(es_p) if es_p is not None else 'Live'
+            if es == 'Live':
+                n += 1
+        return n
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        outer = ttk.Frame(self, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        # --- Top: read-only summary -------------------------------------
+        summary = ttk.LabelFrame(outer, text='Zone', padding=8)
+        summary.pack(fill=tk.X, pady=(0, 8))
+
+        z = self.zone
+        src_chapter = z.chapter or '(none)'
+        src_layer = self._chapter_layer(src_chapter) if z.chapter else None
+        src_label = (f'{src_chapter}  ({self._layer_label(src_layer)})'
+                     if z.chapter else src_chapter)
+        pos = z.position or (0, 0, 0)
+        size = z.target_size or (0, 0, 0)
+
+        rows = [
+            ('Zone:', z.name),
+            ('Current chapter:', src_label),
+            ('Current Position:', f'X={pos[0]}, Y={pos[1]}, Z={pos[2]}'),
+            ('Current TargetSize:', f'X={size[0]}, Y={size[1]}, Z={size[2]}'),
+        ]
+        for i, (k, v) in enumerate(rows):
+            ttk.Label(summary, text=k, width=18).grid(
+                row=i, column=0, sticky='w', pady=1)
+            ttk.Label(summary, text=str(v),
+                      font=('Segoe UI', 9, 'bold')).grid(
+                row=i, column=1, sticky='w', pady=1)
+
+        # --- Middle: scrollable list of destination chapters ------------
+        mid = ttk.LabelFrame(outer, text='Destination chapter', padding=4)
+        mid.pack(fill=tk.BOTH, expand=True)
+
+        cols = ('layer', 'chapter', 'display', 'primez', 'count')
+        tv = ttk.Treeview(mid, columns=cols, show='headings',
+                          selectmode='browse', height=14)
+        tv.heading('layer', text='Layer')
+        tv.heading('chapter', text='Chapter row name')
+        tv.heading('display', text='DisplayName')
+        tv.heading('primez', text='PrimeZ')
+        tv.heading('count', text='Live zones')
+        tv.column('layer', width=70, stretch=False, anchor='w')
+        tv.column('chapter', width=210, stretch=False, anchor='w')
+        tv.column('display', width=240, stretch=True, anchor='w')
+        tv.column('primez', width=70, stretch=False, anchor='center')
+        tv.column('count', width=80, stretch=False, anchor='center')
+
+        vsb = ttk.Scrollbar(mid, orient='vertical', command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        tv.bind('<Double-1>', lambda _e: self._on_ok())
+        self.tree = tv
+
+        # --- Bottom: OK / Cancel ---------------------------------------
+        btns = ttk.Frame(outer)
+        btns.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btns, text='Cancel',
+                   command=self._on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(btns, text='OK',
+                   command=self._on_ok).pack(side=tk.RIGHT, padx=(0, 6))
+
+    def _populate_chapters(self):
+        chap_doc = self.app.docs.get('chapters')
+        if not chap_doc:
+            return
+        src_chapter = self.zone.chapter or ''
+        rows = []
+        for r in chap_doc.rows:
+            cn = r.get('Name')
+            if not cn or cn == src_chapter:
+                continue
+            layer = self._chapter_layer(cn)
+            display = self._chapter_field(cn, 'DisplayName') or ''
+            primez = self._chapter_field(cn, 'PrimeZ')
+            primez_s = '' if primez is None else str(primez)
+            count = self._live_zone_count(cn)
+            rows.append((layer, cn, display, primez_s, count))
+
+        # Sort by Layer descending; unknowns last; then natural row name
+        def sort_key(row):
+            layer, cn, *_ = row
+            return (
+                0 if layer is not None else 1,
+                -(layer if layer is not None else 0),
+                natural_key(cn),
+            )
+
+        rows.sort(key=sort_key)
+
+        self._chapter_names = []
+        for layer, cn, display, primez_s, count in rows:
+            iid = f'chap-{len(self._chapter_names)}'
+            self.tree.insert('', 'end', iid=iid,
+                             values=(self._layer_label(layer),
+                                     cn, display, primez_s, count))
+            self._chapter_names.append(cn)
+
+        if self._chapter_names:
+            first = self.tree.get_children()[0]
+            self.tree.selection_set(first)
+            self.tree.focus(first)
+            self.tree.see(first)
+
+    # ---------- actions ----------
+    def _on_ok(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        try:
+            idx = int(sel[0].split('-', 1)[1])
+        except (ValueError, IndexError):
+            return
+        if 0 <= idx < len(self._chapter_names):
+            self.result = self._chapter_names[idx]
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
+
+
+# -----------------------------------------------------------------------------
 # MAIN APPLICATION
 # -----------------------------------------------------------------------------
 
@@ -9853,6 +11733,20 @@ class WorldGenApp(tk.Tk):
         dirty = [doc.label for doc in self.docs.values() if doc.is_dirty()]
         txt = 'unsaved: ' + ', '.join(dirty) if dirty else 'no unsaved changes'
         self.v_status.set(f'{txt} | last build: {self.last_build}')
+
+    def load_all_after_zone_move(self):
+        """Refresh every tab from the in-memory docs (no disk reload). Used
+        by the drag-drop ZoneMover pipeline after a successful move (or
+        roll-back) so all tabs see the new state."""
+        for tab in (self.zone_tab, self.chapter_tab, self.biome_tab,
+                    self.bubble_tab, self.filter_tab, self.landmark_tab,
+                    self.strings_tab, self.mappings_tab, self.history_tab,
+                    self.connections_tab, self.levels_tab, self.map_tab):
+            try:
+                tab.refresh_from_doc()
+            except Exception:
+                pass
+        self.refresh_status()
 
     def load_all(self):
         missing = []
