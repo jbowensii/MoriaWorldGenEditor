@@ -95,7 +95,7 @@ MOD_NAME = 'SandboxMod'
 # Version lives in SandboxZoneEditor.ini ([build] mod_version). Format is
 # MAJ.MIN.PAT, each segment 0..999. Build auto-bumps patch +1 on success.
 # Starting version (first run, if ini has no value yet): 1.0.1.
-DEFAULT_MOD_VERSION = '2.5.2'
+DEFAULT_MOD_VERSION = '2.5.3'
 
 DATATABLES = {
     'zones':       ('DT_Moria_Zones.json',              'DT_Moria_Zones',              'Zones'),
@@ -339,6 +339,9 @@ TOOLTIPS = {
     'conn_dest_zone':
         "Zone hosting this endpoint. Used together with Landmark for "
         "LandmarkInterface kind, or alone for ZoneInterface.",
+    'hide_unassigned_zones':
+        "Hide zones whose primary chapter is not a Live SandboxSmall chapter "
+        "(orphans, outdoor/bridge chapters, disabled chapters)",
 }
 
 
@@ -4894,9 +4897,10 @@ class ZoneTab(BaseTab):
         # Outdoor.ExpeditionStart). These are scripted campaign exteriors and
         # rarely useful when editing the indoor sandbox layout.
         self._hide_outdoor = tk.BooleanVar(value=True)
-        # Hide zones whose primary chapter has Layer = 0 (ground level +
-        # outdoor/bridge chapters). Default off — show everything.
-        self._hide_layer0 = tk.BooleanVar(value=False)
+        # Hide zones whose primary chapter is not a Live SandboxSmall chapter
+        # (orphans, outdoor/bridge chapters, disabled chapters). Default off —
+        # show everything.
+        self._hide_unassigned = tk.BooleanVar(value=False)
         self._build()
 
     def refresh_from_doc(self):
@@ -4971,19 +4975,14 @@ class ZoneTab(BaseTab):
         except Exception:
             pass
 
-        # Hide zones whose primary chapter has Layer == 0 (ground level +
-        # outdoor/bridge chapters). Composes with the other filters via AND.
-        cb_l0 = ttk.Checkbutton(toolbar, text='Hide Layer 0',
-                                 variable=self._hide_layer0,
+        # Hide zones whose primary chapter is not a Live SandboxSmall chapter.
+        # Composes with the other filters via AND.
+        cb_l0 = ttk.Checkbutton(toolbar, text='Hide unassigned zones',
+                                 variable=self._hide_unassigned,
                                  command=self._populate_tree)
         cb_l0.pack(side=tk.LEFT, padx=(6, 0))
         try:
-            _tt = ('Hide zones whose primary chapter is at Layer 0 '
-                   '(ground level + outdoor/bridge chapters)')
-            # Use the project's tooltip helper if it accepts raw text;
-            # otherwise fall back to a simple ToolTip-on-bind.
-            cb_l0.bind('<Enter>',
-                       lambda e, w=cb_l0, t=_tt: w.configure(cursor='question_arrow'))
+            attach_tooltip(cb_l0, 'hide_unassigned_zones')
         except Exception:
             pass
 
@@ -5324,19 +5323,17 @@ class ZoneTab(BaseTab):
 
     def _populate_tree(self):
         self.tree.delete(*self.tree.get_children())
-        # "Hide Layer 0" filter: zones whose primary Chapter has Layer == 0
-        # are skipped, and the corresponding chapter parent row is also
-        # omitted in grouped mode. Zones with no chapter ref are NOT hidden
-        # by this filter (treated as unknown layer).
-        hide_layer0 = bool(getattr(self, '_hide_layer0',
-                                    tk.BooleanVar(value=False)).get())
+        # "Hide unassigned zones" filter: hide zones whose primary Chapter is
+        # not a Live SandboxSmall chapter (empty chapter, missing row, non-SS
+        # ZoneSet, or Disabled). The corresponding chapter parent row is also
+        # omitted in grouped mode.
+        hide_unassigned = bool(getattr(self, '_hide_unassigned',
+                                        tk.BooleanVar(value=False)).get())
 
-        def _zone_hidden_by_layer0(z):
-            if not hide_layer0:
+        def _zone_hidden_by_unassigned(z):
+            if not hide_unassigned:
                 return False
-            if not z.chapter:
-                return False
-            return self._chapter_layer_int(z.chapter) == 0
+            return not self._chapter_is_live_ss(z.chapter)
 
         if ENABLE_ZONE_CHAPTER_GROUPING:
             # Build chapter parent rows in Layer-descending order (top floor
@@ -5361,8 +5358,9 @@ class ZoneTab(BaseTab):
                 if not cn:
                     continue
                 layer = self._chapter_layer_int(cn)
-                # Skip Layer 0 chapter parents entirely when filter is on.
-                if hide_layer0 and layer == 0:
+                # Skip chapter parents whose underlying row is not a Live SS
+                # chapter (non-SS ZoneSet, Disabled, or missing) when filter on.
+                if hide_unassigned and not self._chapter_is_live_ss(cn):
                     continue
                 sort_key = (0 if layer is not None else 1,
                             -(layer if layer is not None else 0),
@@ -5388,7 +5386,7 @@ class ZoneTab(BaseTab):
             no_chap_iid = ZONE_CHAPTER_IID_PREFIX + '(no chapter)'
             no_chap_inserted = False
             for z in self.zones:
-                if _zone_hidden_by_layer0(z):
+                if _zone_hidden_by_unassigned(z):
                     continue
                 parent = chapter_iids.get(z.chapter)
                 if parent is None:
@@ -5403,7 +5401,7 @@ class ZoneTab(BaseTab):
                 self._insert_row(z, parent=parent)
         else:
             for z in self.zones:
-                if _zone_hidden_by_layer0(z):
+                if _zone_hidden_by_unassigned(z):
                     continue
                 self._insert_row(z)
         self._refresh_count()
@@ -5432,6 +5430,31 @@ class ZoneTab(BaseTab):
                         try: return int(v)
                         except (TypeError, ValueError): return None
         return None
+
+    def _chapter_is_live_ss(self, chapter_name):
+        """True iff chapter_name resolves to a chapter row whose ZoneSet is
+        SandboxSmall and EnabledState is not Disabled. Used by the
+        'Hide unassigned zones' filter to drop orphans, non-SS chapters,
+        and disabled chapters."""
+        if not chapter_name:
+            return False
+        chap_doc = self.app.docs.get('chapters')
+        if not chap_doc:
+            return False
+        for r in chap_doc.rows:
+            if r.get('Name') != chapter_name:
+                continue
+            zs_p = find_prop(r.get('Value', []), 'ZoneSet')
+            zs = get_enum(zs_p) if zs_p is not None else ''
+            if zs != 'SandboxSmall':
+                return False
+            es_p = find_prop(r.get('Value', []), 'EnabledState')
+            es = get_enum(es_p) if es_p is not None else 'Live'
+            if es == 'Disabled':
+                return False
+            return True
+        # No matching row in DT_Moria_Chapters
+        return False
 
     @staticmethod
     def _ordinal(n):
