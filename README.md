@@ -98,12 +98,17 @@ See [Releases](https://github.com/jbowensii/MoriaWorldGenEditor/releases) for fu
 
 ## License
 
-Editor source: personal modding tool. No warranty. Use against backups of your DT files.
+Released under the **MIT License** — see [LICENSE](LICENSE) for full terms. Use at your own risk against backups of your DT files.
 
-Third-party tools downloaded by `install_tools.py` are MIT-licensed (see their respective LICENSE files in `tools/UAssetGUI/` and `tools/retoc/` after running the installer).
+## Attributions
+
+This editor depends on two excellent third-party tools, downloaded fresh from their upstream at install time. See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for full credit and license info.
+
+- **[UAssetGUI](https://github.com/atenfyr/UAssetGUI)** by atenfyr (MIT) — Unreal Engine asset ↔ JSON conversion
+- **[retoc](https://github.com/trumank/retoc)** by trumank (MIT) — IoStore container packing/unpacking
 
 Return to Moria game assets are © Free Range Games / North Beach Games and are not redistributed by this repository.
 
 ## Credits
 
-Built by John Owens (jbowensii) in collaboration with Claude.
+Built by John Owens (jbowensii). Development assisted by Claude (Anthropic).

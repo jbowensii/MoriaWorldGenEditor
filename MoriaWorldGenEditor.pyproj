@@ -34,6 +34,8 @@
   <ItemGroup>
     <Content Include="SandboxZoneEditor.ini" />
     <Content Include="README.md" />
+    <Content Include="LICENSE" />
+    <Content Include="ATTRIBUTIONS.md" />
     <Content Include=".gitignore" />
     <Content Include="docs\PATHS_SETUP.md" />
   </ItemGroup>
