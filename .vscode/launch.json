@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run SandboxZoneEditor",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/SandboxZoneEditor.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true
+        }
+    ]
+}

@@ -1,0 +1,17 @@
+{
+    "python.defaultInterpreterPath": "python",
+    "python.analysis.typeCheckingMode": "off",
+    "python.analysis.autoImportCompletions": true,
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        ".vs": true
+    },
+    "files.eol": "\r\n",
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "[python]": {
+        "editor.tabSize": 4,
+        "editor.formatOnSave": false
+    }
+}
