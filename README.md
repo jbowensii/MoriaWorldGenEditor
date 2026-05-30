@@ -84,7 +84,7 @@ See [Releases](https://github.com/jbowensii/MoriaWorldGenEditor/releases) for fu
 
 ## Documentation
 
-- [`docs/PATHS_SETUP.md`](docs/PATHS_SETUP.md) — alternate ways to point the editor at tools and data if you don't want the default sibling layout
+- [`docs/PATHS_SETUP.md`](docs/PATHS_SETUP.md) — how the editor resolves `tools/` and `experiments/`, and how to relocate them via a `[paths]` section in `SandboxZoneEditor.ini`
 
 ## Troubleshooting
 

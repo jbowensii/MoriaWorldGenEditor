@@ -1,11 +1,11 @@
 # Advanced — Path Configuration
 
-The standard setup flow uses `install_tools.py` and `extract_data.py` to populate `tools/` and `experiments/worldgen_research/` automatically, and the editor's defaults look in those locations. If you need to override the defaults — for example, you've already got UAssetGUI installed elsewhere or you keep your RtoM extracted data in a separate directory — you have a few options.
+The standard setup flow uses `install_tools.py` and `extract_data.py` to populate `tools/` and `experiments/worldgen_research/` automatically, and the editor finds them there with no extra steps. This document covers how that resolution works and how to override it if your tools or data live somewhere else.
 
 ## Default layout (set up by the quick-start scripts)
 
 ```
-MoriaWorldGenEditor/                    (this repo)
+MoriaWorldGenEditor/                    (this repo = PROJECT_ROOT)
 ├── tools/                              (populated by install_tools.py)
 │   ├── UAssetGUI/UAssetGUI.exe
 │   └── retoc/bin/retoc.exe
@@ -16,73 +16,49 @@ MoriaWorldGenEditor/                    (this repo)
 └── ...
 ```
 
-The editor computes:
+`install_tools.py` and `extract_data.py` write `tools/` and `experiments/` **at the repo root**, and the editor looks for them **at the repo root** too. So a fresh `clone → install_tools → extract_data → run` works with no manual moves.
+
+## How the editor resolves paths
+
+At startup the editor determines `PROJECT_ROOT` — the directory that should contain `tools/` and `experiments/` — in this order:
+
+1. **`[paths] project_root` in `SandboxZoneEditor.ini`** — an explicit absolute override (see below).
+2. **The repo root itself** — where the setup scripts write. This is the default.
+3. **The repo root's parent** — the legacy `Moria-Replication` sibling layout (see bottom). Auto-detected only if `experiments/worldgen_research/` or `tools/` actually exists one level up.
+
+If none of those locate existing data, it falls back to the repo root, so a first run before extraction still points at the right place once you run the scripts.
+
+When frozen into a single `.exe` (PyInstaller), `PROJECT_ROOT` anchors to the **folder containing the `.exe`**, not the temporary unpack directory — so drop the `.exe` next to your `tools/` and `experiments/` folders.
 
 ```python
-SCRIPT_DIR = Path(__file__).resolve().parent       # this repo's root
-PROJECT_ROOT = SCRIPT_DIR.parent                   # one level UP
+# Simplified — see SandboxZoneEditor.py for the full resolver
+SCRIPT_DIR = exe-folder if frozen else folder-of-this-script
+PROJECT_ROOT = ini override  ||  repo root  ||  repo-root parent (if it has the data)
 UASSETGUI_EXE = PROJECT_ROOT / 'tools' / 'UAssetGUI' / 'UAssetGUI.exe'
-RETOC_EXE = PROJECT_ROOT / 'tools' / 'retoc' / 'bin' / 'retoc.exe'
+RETOC_EXE     = PROJECT_ROOT / 'tools' / 'retoc' / 'bin' / 'retoc.exe'
+WGR_DIR       = PROJECT_ROOT / 'experiments' / 'worldgen_research'
 ```
 
-Note that `PROJECT_ROOT` is **one level above the script**. If the script is at `MoriaWorldGenEditor/SandboxZoneEditor.py`, then `PROJECT_ROOT` is `MoriaWorldGenEditor/`'s parent — *not* the repo root itself. This is a quirk inherited from the editor's origin in `Moria-Replication/scripts/`. The setup scripts work around this by writing into `tools/` and `experiments/` at the repo root, but the editor then needs to walk up one level to find them.
+## Overriding paths via the `.ini`
 
-**This means the default setup works if the repo's PARENT directory contains the `tools/` and `experiments/` you want to use.** When `install_tools.py` and `extract_data.py` write at the repo root, the editor will look one level higher and not find them.
+Add a `[paths]` section to `SandboxZoneEditor.ini` (next to `SandboxZoneEditor.py`, or next to the `.exe`). Any key you omit keeps its default. All values may use `~` for your home directory.
 
-## Three options to make the editor find the data
+```ini
+[paths]
+; Point the whole layout at a different root (tools/ + experiments/ under it):
+project_root = C:\Tools\MoriaWorldGen
 
-### Option A — Use the setup scripts as-is, then move files
-
-Run `install_tools.py` and `extract_data.py`. They populate `MoriaWorldGenEditor/tools/` and `MoriaWorldGenEditor/experiments/`. Then move those directories one level up:
-
-```powershell
-cd C:\Users\johnb\OneDrive\Documents\Projects\MoriaWorldGenEditor
-Move-Item tools ..
-Move-Item experiments ..
+; ...or override individual targets (these win over project_root):
+uassetgui_exe = C:\Tools\UAssetGUI\UAssetGUI.exe
+retoc_exe     = C:\Tools\retoc\bin\retoc.exe
+worldgen_dir  = D:\RtoM\extracted\worldgen_research
 ```
 
-So they become siblings of the repo, where the editor expects them.
+This is the recommended way to relocate things — it survives `git pull` (the editor reads it at runtime; no source edits) and keeps per-machine paths out of the tracked code.
 
-### Option B — Symlink
+## Coexisting with Moria-Replication (legacy sibling layout)
 
-Inside the repo, create symbolic links pointing at your `tools/` and `experiments/` locations:
-
-```powershell
-# Run as Administrator or in Developer Mode
-cd C:\Users\johnb\OneDrive\Documents\Projects\MoriaWorldGenEditor
-New-Item -ItemType SymbolicLink -Path tools -Target "C:\path\to\your\tools"
-New-Item -ItemType SymbolicLink -Path experiments -Target "C:\path\to\your\experiments"
-```
-
-Then edit the editor's `PROJECT_ROOT` constant (see Option C) to point at the repo root instead of one level up.
-
-Note: symlinks are local to your machine — they are not redistributed via git. Anyone cloning the repo will not have your symlinks.
-
-### Option C — Edit the constants
-
-Open `SandboxZoneEditor.py` and find the path constants near the top:
-
-```python
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-UASSETGUI_EXE = PROJECT_ROOT / 'tools' / 'UAssetGUI' / 'UAssetGUI.exe'
-RETOC_EXE = PROJECT_ROOT / 'tools' / 'retoc' / 'bin' / 'retoc.exe'
-```
-
-Replace with absolute paths to your installation. For example:
-
-```python
-PROJECT_ROOT = Path(r'C:\Users\johnb\OneDrive\Documents\Projects\MoriaWorldGenEditor')
-# OR keep PROJECT_ROOT and override the executables:
-UASSETGUI_EXE = Path(r'C:\Tools\UAssetGUI\UAssetGUI.exe')
-RETOC_EXE = Path(r'C:\Tools\retoc\bin\retoc.exe')
-```
-
-You'll also need to find the references to `experiments/worldgen_research` further down in the file and point them at your data directory.
-
-## Coexisting with Moria-Replication
-
-If you have a `Moria-Replication` checkout that already includes `tools/` and `experiments/worldgen_research/`, you can place this repo as a sibling of its `scripts/` directory and reuse those:
+The editor originated in `Moria-Replication/scripts/`, where `tools/` and `experiments/` lived one directory **above** the script. That layout is still auto-detected: if you place this repo as a sibling of `Moria-Replication/scripts/` and the shared `tools/` / `experiments/` exist at `Moria-Replication/`, the editor finds them via resolution step 3.
 
 ```
 Moria-Replication/
@@ -95,8 +71,4 @@ MoriaWorldGenEditor/          (this repo, sibling of scripts/)
 └── ...
 ```
 
-This works out of the box because the editor's `PROJECT_ROOT = SCRIPT_DIR.parent` lands on `Moria-Replication/`.
-
-## Future improvement
-
-A cleaner architecture would be to read tool and data paths from the `.ini` file rather than computing them from the script's location. If you'd like to contribute that, it's about a 20-line edit near the top of `SandboxZoneEditor.py` and a corresponding section in `SandboxZoneEditor.ini`. Open a PR.
+No configuration needed — but you can always pin it explicitly with `[paths] project_root` if you prefer.

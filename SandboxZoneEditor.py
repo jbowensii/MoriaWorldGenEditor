@@ -79,13 +79,60 @@ ZONE_CHAPTER_IID_PREFIX = '__chap__:'
 # Paths & constants
 # -----------------------------------------------------------------------------
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-WGR_DIR = PROJECT_ROOT / 'experiments' / 'worldgen_research'
-
-UASSETGUI_EXE = PROJECT_ROOT / 'tools' / 'UAssetGUI' / 'UAssetGUI.exe'
-RETOC_EXE = PROJECT_ROOT / 'tools' / 'retoc' / 'bin' / 'retoc.exe'
+if getattr(sys, 'frozen', False):
+    # Frozen build (PyInstaller): anchor to the .exe's own folder, not the
+    # temporary extraction dir that __file__ points at inside a onefile build.
+    SCRIPT_DIR = Path(sys.executable).resolve().parent
+else:
+    SCRIPT_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = SCRIPT_DIR / 'SandboxZoneEditor.ini'
+
+# Optional [paths] overrides, parsed once from the .ini at startup. This lets
+# the editor find tools/ and experiments/ wherever they live instead of
+# hard-assuming a single fixed layout relative to the script.
+_PATHS_INI = {}
+try:
+    if SETTINGS_PATH.exists():
+        _cp = configparser.ConfigParser()
+        _cp.read(SETTINGS_PATH, encoding='utf-8')
+        if _cp.has_section('paths'):
+            _PATHS_INI = {k: v.strip() for k, v in _cp.items('paths') if v.strip()}
+except (configparser.Error, OSError):
+    _PATHS_INI = {}
+
+
+def _path_override(key, default):
+    """Return an absolute Path from [paths] in the .ini, else the default."""
+    val = _PATHS_INI.get(key, '')
+    return Path(val).expanduser() if val else default
+
+
+def _resolve_project_root():
+    """Find the directory that contains tools/ and experiments/.
+
+    Resolution order:
+      1. [paths] project_root override in SandboxZoneEditor.ini
+      2. The repo root itself (where install_tools.py / extract_data.py write)
+      3. The repo root's parent (legacy Moria-Replication sibling layout)
+
+    Defaults to the repo root so a fresh clone + setup-script run works out of
+    the box -- matching exactly where the quick-start scripts place their data.
+    """
+    override = _PATHS_INI.get('project_root', '')
+    if override:
+        p = Path(override).expanduser()
+        if p.is_dir():
+            return p
+    for cand in (SCRIPT_DIR, SCRIPT_DIR.parent):
+        if (cand / 'experiments' / 'worldgen_research').is_dir() or (cand / 'tools').is_dir():
+            return cand
+    return SCRIPT_DIR
+
+
+PROJECT_ROOT = _resolve_project_root()
+WGR_DIR = _path_override('worldgen_dir', PROJECT_ROOT / 'experiments' / 'worldgen_research')
+UASSETGUI_EXE = _path_override('uassetgui_exe', PROJECT_ROOT / 'tools' / 'UAssetGUI' / 'UAssetGUI.exe')
+RETOC_EXE = _path_override('retoc_exe', PROJECT_ROOT / 'tools' / 'retoc' / 'bin' / 'retoc.exe')
 UE_VERSION = 'VER_UE4_27'
 RETOC_VERSION = 'UE4_27'
 

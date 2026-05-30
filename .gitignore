@@ -42,6 +42,9 @@ tools/
 # Extracted game data (user-provided via extract_data.py, never committed)
 experiments/
 
+# Frozen-exe build output (shipped as GitHub Release assets, not committed)
+release/
+
 # Generated mod paks
 *.zip
 *.pak
