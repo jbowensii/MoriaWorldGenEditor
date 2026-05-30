@@ -1,0 +1,71 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build (syntax check)",
+            "type": "process",
+            "command": "python",
+            "args": [
+                "-m", "py_compile", "SandboxZoneEditor.py"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "detail": "Verify SandboxZoneEditor.py is syntactically valid Python"
+        },
+        {
+            "label": "Setup: install external tools",
+            "type": "process",
+            "command": "python",
+            "args": [
+                "scripts/install_tools.py"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Download UAssetGUI + retoc from upstream into ./tools/"
+        },
+        {
+            "label": "Setup: extract game data",
+            "type": "process",
+            "command": "python",
+            "args": [
+                "scripts/extract_data.py",
+                "--rtom-path",
+                "${input:rtomPath}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Extract worldgen DataTables from your Return to Moria install"
+        },
+        {
+            "label": "Run editor",
+            "type": "process",
+            "command": "python",
+            "args": [
+                "SandboxZoneEditor.py"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Launch the Tkinter editor"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "rtomPath",
+            "type": "promptString",
+            "description": "Path to your Return to Moria install root",
+            "default": "C:\\Program Files\\Epic Games\\ReturnToMoria"
+        }
+    ]
+}

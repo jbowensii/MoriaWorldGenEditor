@@ -1,0 +1,19 @@
+{
+    "folders": [
+        {
+            "name": "MoriaWorldGenEditor",
+            "path": "."
+        }
+    ],
+    "settings": {
+        "python.defaultInterpreterPath": "python",
+        "python.analysis.typeCheckingMode": "off",
+        "files.eol": "\r\n"
+    },
+    "extensions": {
+        "recommendations": [
+            "ms-python.python",
+            "ms-python.debugpy"
+        ]
+    }
+}
